@@ -56,7 +56,7 @@ on:
         required: false
         default: "1"
       new_inputs:
-        description: "Четыре новых входа (бриф, docx, pdf, чужой JSON) на всех шаблонах, с живым разбором входа и аудитом"
+        description: "Четыре новых входа (бриф, docx, pdf, чужой JSON) на всех шаблонах: true — все, `вход:шаблон` — одна пара (brief:vk_tech)"
         required: false
         default: "false"
       template:
@@ -155,7 +155,7 @@ jobs:
             --save probe-out/audit-probe.json
 
       - name: Диагностический вызов
-        if: ${{ inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs != 'true' }}
+        if: ${{ inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' }}
         env:
           LLM_BASE_URL: ${{ inputs.base_url }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -192,7 +192,7 @@ jobs:
       # поэтому полученный план дублируется в лог: оттуда его можно взять как
       # настоящую фикстуру вместо рукописной.
       - name: Полученный план целиком
-        if: ${{ always() && inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs != 'true' }}
+        if: ${{ always() && inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' }}
         run: |
           if [ -f probe-out/plan_deck.json ]; then
             echo "----- НАЧАЛО plan_deck.json -----"
@@ -237,7 +237,7 @@ jobs:
       # на колоду). Контент-пакет, план и сводка аудита уходят в лог: артефакты
       # из среды разработки недоступны, а по плану колода собирается заново.
       - name: Новые входы на всех шаблонах
-        if: ${{ inputs.new_inputs == 'true' }}
+        if: ${{ inputs.new_inputs != 'false' }}
         env:
           LLM_BASE_URL: ${{ inputs.base_url }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -245,6 +245,7 @@ jobs:
           VLM_BASE_URL: ${{ inputs.base_url }}
           VLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           VLM_MODEL: ${{ inputs.model }}
+          ONLY: ${{ inputs.new_inputs }}
         run: |
           if [ -z "$LLM_API_KEY" ]; then
             echo "::error::Секрет LLM_API_KEY не задан."
@@ -255,6 +256,9 @@ jobs:
             for TEMPLATE in data/templates/vk_tech.pptx data/templates/vk_workspace.pptx \
                             data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx; do
               NAME=$(basename "$TEMPLATE" .pptx)
+              if [ "$ONLY" != "true" ] && [ "$ONLY" != "$INPUT:$NAME" ]; then
+                continue
+              fi
               OUT="probe-out/new/$INPUT/$NAME"
               mkdir -p "$OUT"
               python - "$INPUT" > "$OUT/args" <<'PY'
