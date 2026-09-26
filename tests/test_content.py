@@ -258,3 +258,27 @@ def test_plan_number_that_is_not_in_the_input_is_an_error():
     found = undeclared_numbers(spoiled, pack)
     assert [issue.check_id for issue in found] == ["content.undeclared_number"]
     assert "35" in found[0].message and "3 " not in found[0].message.split("числа")[1][:3]
+
+
+def test_quote_block_gets_its_text_and_author():
+    """Блок цитаты с одним `quote_id` получает текст: иначе слайд пустой."""
+    from deckwright.plan.planner import resolve_quotes
+    from deckwright.schemas import DeckPlan
+
+    pack = ContentPack.model_validate(
+        {
+            "brief": {"topic": "CRM", "purpose": "project"},
+            "documents": [{"id": "d1", "name": "r.docx", "kind": "docx"}],
+            "quotes": [{"id": "q1", "text": "Видим клиента целиком", "author": "Мария Ковалёва",
+                        "role": "руководитель линии", "source_doc_id": "d1"}],
+        }
+    )
+    plan = DeckPlan.model_validate(
+        {
+            "title": "CRM", "purpose": "project",
+            "slides": [{"index": 1, "intent": "evidence", "takeaway_title": "Клиент целиком",
+                        "blocks": [{"id": "b1", "kind": "quote", "quote_id": "q1"}]}],
+        }
+    )
+    items = resolve_quotes(plan, pack).slides[0].blocks[0].items
+    assert items == ["«Видим клиента целиком»", "— Мария Ковалёва, руководитель линии"]

@@ -162,4 +162,24 @@ def build_plan(
         length_limits=limits,
     )
     plan = client.complete(step=prompt.step, prompt=text, schema=DeckPlan)
-    return plan, prompt, budget
+    return resolve_quotes(plan, pack), prompt, budget
+
+
+def resolve_quotes(plan: DeckPlan, pack: ContentPack) -> DeckPlan:
+    """Блок цитаты получает её текст и автора из контент-пакета.
+
+    Модель ссылается на цитату идентификатором и текст не переписывает — так
+    цитата остаётся дословной. Но вёрстка кладёт на слайд строки блока, а у
+    блока с одним `quote_id` их нет: слайд с цитатой выходил пустым (живой
+    прогон на docx-отчёте, все три варианта).
+    """
+    quotes = {quote.id: quote for quote in pack.quotes}
+    plan = plan.model_copy(deep=True)
+    for slide in plan.slides:
+        for block in slide.blocks:
+            quote = quotes.get(block.quote_id or "")
+            if quote is None or block.items:
+                continue
+            who = ", ".join(part for part in (quote.author, quote.role) if part)
+            block.items = [f"«{quote.text}»"] + ([f"— {who}"] if who else [])
+    return plan
