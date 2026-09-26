@@ -11,11 +11,13 @@ from pathlib import Path
 from statistics import median
 
 from deckwright.config import load_config
+from deckwright.content.ingest import IngestError, IngestInput, ingest
+from deckwright.content.readers import UnsupportedInput
 from deckwright.environment import run_checks
 from deckwright.llm.base import StructuredClient
 from deckwright.llm.fake import RecordedClient
 from deckwright.pipeline import run_variant
-from deckwright.schemas import ContentPack, RunSummary
+from deckwright.schemas import ContentPack, DeckPurpose, RunSummary
 
 DEFAULT_CONFIG = Path("configs/config.yaml")
 
@@ -83,11 +85,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # требует воспроизводимого запуска одной командой с конфиг-файлом.
     template = args.template or cfg.run.template
     content = args.content or cfg.run.content
-    missing = [
-        name
-        for name, value in (("--template", template), ("--content", content))
-        if value is None
-    ]
+    files = [Path(path) for path in ([content] if content else []) + list(args.input)]
+    missing = [name for name, value in (("--template", template),) if value is None]
+    if not files and not args.brief.strip():
+        missing.append("--content, --input или --brief")
     if missing:
         print(
             f"Не задано: {', '.join(missing)}. Укажите аргументами или пропишите "
@@ -96,14 +97,37 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # Разбор входа в бюджет не входит (A18), но меряется: иначе не видно, что
-    # именно из него вычтено.
+    # Бюджет — на всю колоду, включая разбор входа: приведение входа к
+    # контент-пакету — вызов модели, и он меряется тем же секундомером.
     run_started = time.monotonic()
-    pack = ContentPack.model_validate(
-        json.loads(Path(content).read_text(encoding="utf-8"))
-    )
-    pack_seconds = time.monotonic() - run_started
     client = _make_client(cfg, args.recorded)
+    try:
+        ingested = ingest(
+            IngestInput(
+                text=args.brief,
+                files=files,
+                purpose=DeckPurpose(args.purpose) if args.purpose else None,
+                author=args.author,
+                author_role=args.author_role,
+            ),
+            client,
+            default_purpose=DeckPurpose(cfg.deck.purpose),
+        )
+    except (IngestError, UnsupportedInput) as exc:
+        print(f"Вход не разобран: {exc}", file=sys.stderr)
+        return 2
+    pack = ingested.pack
+    pack_seconds = time.monotonic() - run_started
+    print(
+        f"[вход] {len(ingested.sources) or 1} документ(ов), фактов {len(pack.facts)}, "
+        f"рядов {len(pack.series)}, цитат {len(pack.quotes)}, тема «{pack.brief.topic}», "
+        f"назначение {pack.brief.purpose.value}; разбор {pack_seconds:.1f}с"
+    )
+    for warning in ingested.warnings:
+        print(f"[вход] ⚠ {warning}", file=sys.stderr)
+    if args.save_pack:
+        Path(args.save_pack).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.save_pack).write_text(pack.model_dump_json(indent=2), encoding="utf-8")
     vlm_client = _make_vlm_client(cfg, args.recorded)
 
     variants = [v.name for v in cfg.variants] if args.variant is None else [args.variant]
@@ -136,6 +160,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             vlm_client=vlm_client,
         )
         prepared = result.prepared
+        if args.save_plan and variant == variants[0]:
+            Path(args.save_plan).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.save_plan).write_text(
+                prepared.plan.model_dump_json(indent=2), encoding="utf-8"
+            )
         # Вопросы текстового прохода аудита задаются по плану, а план один на
         # три варианта: опечатки и единый язык от вёрстки не зависят.
         text_findings = result.text_findings
@@ -192,6 +221,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         finished_at=datetime.now(UTC),
         variant_seconds=variant_seconds,
         parse_seconds=parse_seconds,
+        ingest_seconds=round(pack_seconds, 3),
         generation_seconds=round(total - parse_seconds, 3),
         total_seconds=round(total, 3),
         budget_seconds=cfg.run.time_budget_seconds,
@@ -201,9 +231,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         summary.model_dump_json(indent=2), encoding="utf-8"
     )
     print(
-        f"[прогон] разбор входа {summary.parse_seconds}с (вне бюджета); "
-        f"генерация вариантов ({len(variant_seconds)}) {summary.generation_seconds}с "
-        f"из {summary.budget_seconds}с "
+        f"[прогон] разбор входа {summary.parse_seconds}с "
+        f"(из них материалы {summary.ingest_seconds}с); "
+        f"генерация вариантов ({len(variant_seconds)}) {summary.generation_seconds}с; "
+        f"всего {summary.total_seconds}с из {summary.budget_seconds}с "
         f"({'в бюджете' if summary.within_budget else 'ВНЕ БЮДЖЕТА'})"
     )
     return 0
@@ -775,7 +806,35 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--content",
         default=None,
-        help="Контент-пакет в JSON; по умолчанию run.content из конфига.",
+        help="Материалы: контент-пакет в JSON или любой файл входа; по умолчанию "
+        "run.content из конфига.",
+    )
+    run.add_argument(
+        "--input",
+        action="append",
+        default=[],
+        help="Ещё файл входа: txt, md, docx, pdf, pptx, json. Можно несколько раз.",
+    )
+    run.add_argument(
+        "--brief", default="", help="Текст брифа или готовый материал — как в поле ввода."
+    )
+    run.add_argument(
+        "--purpose",
+        choices=[p.value for p in DeckPurpose],
+        default=None,
+        help="Назначение: feature, product, project, initiative; по умолчанию deck.purpose.",
+    )
+    run.add_argument("--author", default="", help="Кто выступает: подпись спикера.")
+    run.add_argument("--author-role", default="", help="Должность выступающего.")
+    run.add_argument(
+        "--save-pack",
+        default=None,
+        help="Сохранить контент-пакет, полученный из входа, в этот JSON.",
+    )
+    run.add_argument(
+        "--save-plan",
+        default=None,
+        help="Сохранить план колоды (он общий для вариантов) в этот JSON.",
     )
     run.add_argument("--variant", default=None, help="Один вариант вместо всех из конфига.")
     run.add_argument("--output", default=None, help="Каталог артефактов.")

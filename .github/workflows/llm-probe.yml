@@ -55,6 +55,10 @@ on:
         description: "Сколько находок переписать (0 — все)"
         required: false
         default: "1"
+      new_inputs:
+        description: "Четыре новых входа (бриф, docx, pdf, чужой JSON) на всех шаблонах: true — все, `вход:шаблон` — одна пара (brief:vk_tech)"
+        required: false
+        default: "false"
       template:
         description: "Шаблон: путь в репозитории или `synthetic` для собираемого на месте"
         required: false
@@ -151,7 +155,7 @@ jobs:
             --save probe-out/audit-probe.json
 
       - name: Диагностический вызов
-        if: ${{ inputs.audit != 'true' && inputs.rewrite != 'true' }}
+        if: ${{ inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' }}
         env:
           LLM_BASE_URL: ${{ inputs.base_url }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -188,7 +192,7 @@ jobs:
       # поэтому полученный план дублируется в лог: оттуда его можно взять как
       # настоящую фикстуру вместо рукописной.
       - name: Полученный план целиком
-        if: ${{ always() && inputs.audit != 'true' && inputs.rewrite != 'true' }}
+        if: ${{ always() && inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' }}
         run: |
           if [ -f probe-out/plan_deck.json ]; then
             echo "----- НАЧАЛО plan_deck.json -----"
@@ -224,6 +228,83 @@ jobs:
             --content tests/fixtures/content_pack.json \
             --fix auto \
             --output probe-out/deck
+
+      # Проверка приёма входа на контенте, которого нет в датасете: короткий
+      # бриф, длинный docx, PDF с таблицей, JSON чужой структуры — каждый на
+      # всех шаблонах. Прогоны идут подряд, а не параллельно: у аккаунта один
+      # минутный лимит токенов на всех, и параллельные прогоны мерили бы
+      # очередь, а не прогон. Время — полное, с разбором входа (бюджет 300 с
+      # на колоду). Контент-пакет, план и сводка аудита уходят в лог: артефакты
+      # из среды разработки недоступны, а по плану колода собирается заново.
+      - name: Новые входы на всех шаблонах
+        if: ${{ inputs.new_inputs != 'false' }}
+        env:
+          LLM_BASE_URL: ${{ inputs.base_url }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ inputs.model }}
+          VLM_BASE_URL: ${{ inputs.base_url }}
+          VLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          VLM_MODEL: ${{ inputs.model }}
+          ONLY: ${{ inputs.new_inputs }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "::error::Секрет LLM_API_KEY не задан."
+            exit 1
+          fi
+          python tests/fixtures/make_inputs.py probe-inputs
+          for INPUT in brief docx pdf json; do
+            for TEMPLATE in data/templates/vk_tech.pptx data/templates/vk_workspace.pptx \
+                            data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx; do
+              NAME=$(basename "$TEMPLATE" .pptx)
+              if [ "$ONLY" != "true" ] && [ "$ONLY" != "$INPUT:$NAME" ]; then
+                continue
+              fi
+              OUT="probe-out/new/$INPUT/$NAME"
+              mkdir -p "$OUT"
+              python - "$INPUT" > "$OUT/args" <<'PY'
+          import json, shlex, sys
+          spec = json.load(open("probe-inputs/inputs.json", encoding="utf-8"))[sys.argv[1]]
+          args = ["--purpose", spec["purpose"]]
+          if spec["text"]:
+              args += ["--brief", spec["text"]]
+          for name in spec["files"]:
+              args += ["--input", f"probe-inputs/{name}"]
+          print(shlex.join(args))
+          PY
+              echo "===== ПРОГОН $INPUT × $NAME ====="
+              eval deckwright run --template "$TEMPLATE" $(cat "$OUT/args") \
+                --fix auto --output "$OUT" \
+                --save-pack "$OUT/pack.json" --save-plan "$OUT/plan.json" \
+                > "$OUT/run.log" 2>&1 || echo "прогон упал: код $?"
+              grep -E '^\[(вход|прогон)\]|ВНЕ|Traceback|Error' "$OUT/run.log" || true
+              python - "$OUT" <<'PY'
+          import collections, glob, json, pathlib, sys
+          out = pathlib.Path(sys.argv[1])
+          summary = {}
+          for path in sorted(glob.glob(str(out / "*" / "*.audit.json"))):
+              report = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+              issues = report.get("issues", report)
+              counts = collections.Counter(
+                  f"{i['severity']}:{i['check_id']}" for i in issues
+              )
+              summary[pathlib.Path(path).stem] = {
+                  "counts": dict(counts),
+                  "errors": [
+                      f"{i['slide_index']}: {i['check_id']}: {i['message'][:160]}"
+                      for i in issues if i["severity"] == "error"
+                  ],
+              }
+          print("----- НАЧАЛО audit -----")
+          print(json.dumps(summary, ensure_ascii=False))
+          print("----- КОНЕЦ audit -----")
+          for name in ("run-summary.json", "pack.json", "plan.json"):
+              path = out / name
+              print(f"----- НАЧАЛО {name} -----")
+              print(path.read_text(encoding="utf-8") if path.exists() else "(нет)")
+              print(f"----- КОНЕЦ {name} -----")
+          PY
+            done
+          done
 
       - name: Результаты
         if: always()

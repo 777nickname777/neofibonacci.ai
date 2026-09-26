@@ -157,3 +157,22 @@ def test_without_password_the_interface_is_open(monkeypatch):
     app = _app(monkeypatch, None).run()
     assert not [field for field in app.text_input if field.label == "Пароль"]
     assert app.sidebar.button
+
+
+def test_input_accepts_a_brief_and_files_of_any_format(monkeypatch):
+    """Вход: поле брифа, загрузка txt/md/docx/pdf/pptx/json, назначение, спикер."""
+    app = _app(monkeypatch, None).run()
+    assert [area.label for area in app.sidebar.text_area] == ["Бриф или текст"]
+    assert {"Кто выступает", "Должность выступающего"} <= {
+        field.label for field in app.sidebar.text_input
+    }
+    purpose = next(box for box in app.sidebar.selectbox if box.label == "Назначение")
+    assert purpose.options == [
+        "определить по материалам", "фича", "продукт", "проект", "инициатива"
+    ]
+    # Без входа предлагается демонстрационный пакет; с брифом — уже нет.
+    sample = next(box for box in app.sidebar.checkbox if "демонстрационный" in box.label)
+    assert sample.value is True
+    app.sidebar.text_area[0].input("Покажем фичу автопротокола руководителям.").run()
+    sample = next(box for box in app.sidebar.checkbox if "демонстрационный" in box.label)
+    assert sample.value is False

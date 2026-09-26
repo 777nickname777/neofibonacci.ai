@@ -74,6 +74,11 @@ llm:
   # Параметр, который endpoint не поддерживает, отбрасывается и не роняет прогон
   # (см. llm/client.py: отбрасывание по ответу 400 + запоминание на endpoint).
   steps:
+    # Приведение входа к контент-пакету: один вызов на прогон, до планирования.
+    ingest_content:
+      temperature: 0.1
+      max_tokens: 5000
+      enable_thinking: false
     plan_deck:
       temperature: 0.4
       max_tokens: 6000

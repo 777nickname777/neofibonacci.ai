@@ -944,3 +944,20 @@ def test_text_over_the_templates_line_is_caught():
     # Линия ниже рамки — тоже.
     below = top_line.model_copy(update={"y": frame.bottom + inch // 10})
     assert geometry.text_over_decor(slide(VAlign.TOP), spec(below)) == []
+
+
+def test_number_written_on_a_slide_but_absent_from_the_input_is_caught(pack):
+    """Необъявленное число в пункте, которого во входе нет, — ошибка."""
+    from pathlib import Path
+
+    from deckwright.audit.deterministic.content import undeclared_numbers
+    from deckwright.schemas import DeckPlan
+
+    plan = DeckPlan.model_validate(
+        json.loads(
+            (Path(__file__).parent / "fixtures" / "recorded" / "plan_deck.json").read_text("utf-8")
+        )
+    )
+    plan.slides[2].blocks[0].items.append("Рост выручки на 37 % за год")
+    found = undeclared_numbers(plan, pack)
+    assert [issue.check_id for issue in found] == ["content.undeclared_number"]

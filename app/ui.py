@@ -36,8 +36,9 @@ if str(ROOT) not in sys.path:  # запуск через `streamlit run app/ui.p
 from app import audit_overlay, runs  # noqa: E402
 
 from deckwright.config import load_config  # noqa: E402
+from deckwright.content.ingest import IngestInput  # noqa: E402
 from deckwright.llm.fake import RecordedClient  # noqa: E402
-from deckwright.schemas import ContentPack, FixKind, Severity  # noqa: E402
+from deckwright.schemas import ContentPack, DeckPurpose, FixKind, Severity  # noqa: E402
 
 CONFIG = ROOT / "configs" / "config.yaml"
 SAMPLE_PACK = ROOT / "tests" / "fixtures" / "content_pack.json"
@@ -97,14 +98,47 @@ def _make_client(cfg, recorded: bool):
     return LiveClient(cfg.llm), vlm
 
 
+PURPOSES = {
+    "": "определить по материалам",
+    "feature": "фича",
+    "product": "продукт",
+    "project": "проект",
+    "initiative": "инициатива",
+}
+
+
 def _sidebar(cfg):
-    """Вход прогона. Возвращает параметры запуска или None."""
+    """Вход прогона. Возвращает параметры запуска или None.
+
+    Материалы — в любом виде: текст в поле (короткий бриф или готовый
+    текст) и файлы txt, md, docx, pdf, pptx, json. JSON в нашей схеме
+    контент-пакета берётся как есть, всё остальное приводится к ней моделью.
+    """
     st.sidebar.header("Что собираем")
 
     template = st.sidebar.file_uploader("Шаблон презентации", type=["pptx", "potx"])
-    pack_file = st.sidebar.file_uploader("Контент-пакет (JSON)", type=["json"])
+    text = st.sidebar.text_area(
+        "Бриф или текст",
+        height=160,
+        placeholder=(
+            "Пара предложений о том, что и кому показываем, — сервис сам решит, "
+            "сколько слайдов и что на них. Или вставьте готовый текст."
+        ),
+    )
+    files = st.sidebar.file_uploader(
+        "Материалы",
+        type=["txt", "md", "docx", "pdf", "pptx", "json"],
+        accept_multiple_files=True,
+        help="Документы, таблицы, выгрузки. Цифры на слайдах берутся только отсюда.",
+    )
+    purpose = st.sidebar.selectbox(
+        "Назначение", options=list(PURPOSES), format_func=PURPOSES.get
+    )
+    author = st.sidebar.text_input("Кто выступает", placeholder="Имя Фамилия")
+    author_role = st.sidebar.text_input("Должность выступающего")
+    has_input = bool(text.strip() or files)
     use_sample = st.sidebar.checkbox(
-        "Взять демонстрационный контент-пакет", value=pack_file is None
+        "Взять демонстрационный контент-пакет", value=not has_input
     )
 
     names = [variant.name for variant in cfg.variants]
@@ -128,25 +162,62 @@ def _sidebar(cfg):
     recorded = st.sidebar.checkbox(
         "Записанные ответы модели",
         value=not cfg.llm.configured,
-        help="Прогон без ключа и без сети: план берётся из записи.",
+        help=(
+            "Прогон без ключа и без сети: план берётся из записи. Работает только "
+            "с демонстрационным контент-пакетом — разобрать новый вход без модели нельзя."
+        ),
     )
     if not recorded and not cfg.llm.configured:
         st.sidebar.warning("Модель не настроена: заполните .env или включите записанные ответы.")
 
-    ready = template is not None and (pack_file is not None or use_sample) and chosen
+    ready = template is not None and (has_input or use_sample) and chosen
     if not st.sidebar.button("Собрать", type="primary", disabled=not ready):
         return None
 
-    raw = json.loads(
-        pack_file.getvalue().decode("utf-8") if pack_file else SAMPLE_PACK.read_text("utf-8")
-    )
+    if use_sample and not has_input:
+        request = ContentPack.model_validate(json.loads(SAMPLE_PACK.read_text("utf-8")))
+        if author or author_role or purpose:
+            updates = {"author": author, "author_role": author_role}
+            if purpose:
+                updates["purpose"] = DeckPurpose(purpose)
+            request = request.model_copy(
+                update={"brief": request.brief.model_copy(update=updates)}
+            )
+    else:
+        request = IngestInput(
+            text=text,
+            files=[_save_upload(upload, UPLOADS) for upload in files or []],
+            purpose=DeckPurpose(purpose) if purpose else None,
+            author=author,
+            author_role=author_role,
+        )
     return {
         "template": _save_upload(template, UPLOADS),
-        "pack": ContentPack.model_validate(raw),
+        "request": request,
         "variants": chosen,
         "fix_mode": fix_mode,
         "recorded": recorded,
     }
+
+
+def _input_summary(state: runs.RunState) -> None:
+    """Что сервис понял из входа: тема, назначение, сколько фактов и что отброшено."""
+    pack = state.pack
+    if pack is None:
+        return
+    with st.expander(
+        f"Материалы: «{pack.brief.topic}» · {PURPOSES.get(pack.brief.purpose.value)} · "
+        f"фактов {len(pack.facts)}, рядов {len(pack.series)}, цитат {len(pack.quotes)} · "
+        f"разбор {state.ingest_seconds} с"
+    ):
+        for fact in pack.facts:
+            where = f" ({fact.locator})" if fact.locator else ""
+            st.markdown(f"- {fact.text}{where}")
+        for series in pack.series:
+            points = ", ".join(f"{p.label}: {p.value:g}" for p in series.points)
+            st.markdown(f"- ряд «{series.name}»: {points}")
+        for warning in state.ingest_warnings:
+            st.warning(warning)
 
 
 @st.fragment(run_every=2)
@@ -169,7 +240,10 @@ def _progress(state: runs.RunState, cfg) -> None:
     total = len(state.variants)
     st.progress(
         min(1.0, state.done_count / total if total else 1.0),
-        text=f"готово вариантов {state.done_count} из {total}, {state.elapsed} с",
+        text=(
+            f"{state.stage}: готово вариантов {state.done_count} из {total}, "
+            f"{state.elapsed} с из {cfg.run.time_budget_seconds} с"
+        ),
     )
     columns = st.columns(total or 1)
     for column, variant_state in zip(columns, state.variants.values(), strict=False):
@@ -366,7 +440,7 @@ def main() -> None:
         client, vlm = _make_client(cfg, request["recorded"])
         state = runs.start(
             template_path=request["template"],
-            pack=request["pack"],
+            request=request["request"],
             cfg=cfg,
             client=client,
             variants=request["variants"],
@@ -382,7 +456,10 @@ def main() -> None:
     run_id = st.query_params.get("run")
     state = runs.get(run_id) if run_id else runs.latest()
     if state is None:
-        st.info("Загрузите шаблон и контент-пакет слева, затем нажмите «Собрать».")
+        st.info(
+            "Загрузите шаблон, впишите бриф или приложите материалы слева, "
+            "затем нажмите «Собрать»."
+        )
         return
 
     st.subheader(f"Прогон {state.run_id} · {state.template_name}")
@@ -392,6 +469,7 @@ def main() -> None:
         _live_progress(state, cfg)
     if state.error:
         st.error(state.error)
+    _input_summary(state)
 
     ready = state.ready()
     if ready:

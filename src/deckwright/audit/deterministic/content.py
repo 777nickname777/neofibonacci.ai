@@ -312,6 +312,60 @@ def figures(plan: DeckPlan, pack) -> list[Issue]:
     return found
 
 
+# Целые до этого значения — счёт и нумерация («3 шага», «Этап 2»), а не факт.
+SMALL_COUNT = 10
+
+
+def undeclared_numbers(plan: DeckPlan, pack) -> list[Issue]:
+    """Число в тексте слайда, которого во входе нет: ни в фактах, ни в рядах.
+
+    `figure_not_in_sources` проверяет только числа, которые модель сама
+    объявила в `figures`. Число, написанное в пункте и не объявленное,
+    проходило молча — а это ровно выдуманная цифра. Здесь проверяется весь
+    текст слайда: заголовок, подзаголовок, пункты, ячейки таблиц. Число
+    засчитывается, если оно есть во входе (с точностью до масштаба записи)
+    или объявлено выведенным и сходится со своей формулой.
+    """
+    from deckwright.content.grounding import source_numbers, ungrounded
+
+    sources = [pack.brief.topic, pack.brief.request, pack.brief.goal, pack.brief.audience]
+    sources += [pack.brief.extra_instructions]
+    for fact in pack.facts:
+        sources.append(fact.text)
+        if fact.value is not None:
+            sources.append(f"{fact.value:g}")
+    for series in pack.series:
+        sources.append(series.name)
+        sources += [f"{point.label} {point.value:g}" for point in series.points]
+    sources += [quote.text for quote in pack.quotes]
+    grounded = source_numbers("\n".join(sources))
+
+    found: list[Issue] = []
+    for slide in plan.slides:
+        allowed = set(grounded)
+        for figure in slide.figures:
+            if verify_figure(figure, pack) is None:
+                allowed |= source_numbers(figure.text)
+        texts = [slide.takeaway_title, slide.subtitle]
+        for block in slide.blocks:
+            texts += [block.heading, *block.items]
+            if block.table is not None:
+                texts += list(block.table.columns)
+                texts += [cell for row in block.table.rows for cell in row]
+        invented = sorted({n for text in texts for n in ungrounded(text, allowed, SMALL_COUNT)})
+        if invented:
+            found.append(
+                _issue(
+                    "content.undeclared_number",
+                    slide.index,
+                    "числа "
+                    + ", ".join(f"{n:g}" for n in invented)
+                    + " на слайде, а во входе их нет",
+                )
+            )
+    return found
+
+
 def run(
     deck: DeckIR,
     plan: DeckPlan,
@@ -327,6 +381,7 @@ def run(
         found.extend(density(slide, max_bullets, max_words, min_fill))
     found.extend(duplicate_slides(deck))
     found.extend(figures(plan, pack))
+    found.extend(undeclared_numbers(plan, pack))
     if pptx_path is not None:
         found.extend(fill_ratio(pptx_path, deck, min_fill))
         found.extend(package(pptx_path))

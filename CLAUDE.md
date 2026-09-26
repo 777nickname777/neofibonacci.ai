@@ -15,7 +15,8 @@ Streamlit (UI) · OpenAI-совместимый клиент к модели с 
 pip install -e ".[dev]"                                  # установка
 ruff check .                                             # линтер   (gate)
 pytest -q                                                # тесты    (gate)
-python -m deckwright.cli run --config configs/config.yaml --template T --brief B
+python -m deckwright.cli run --config configs/config.yaml --template T \
+  --brief "бриф" --input отчёт.docx --purpose project    # вход в любом виде
 streamlit run app/ui.py                                  # веб-интерфейс
 docker compose up --build                                # всё в контейнере
 ```
@@ -25,8 +26,9 @@ docker compose up --build                                # всё в конте�
 ## Архитектура в десять строк
 
 ```
+бриф + файлы ─►[0 content]─► ContentPack  факты, ряды, цитаты; числа сверены с входом
 template.pptx ─►[1 parse ]─► TemplateSpec  токены, layouts, паттерны, шрифты, декор
-brief+content ─►[2 plan  ]─► DeckPlan      слайды: намерение, заголовок-вывод, блоки, данные
+ContentPack  ─►[2 plan  ]─► DeckPlan      слайды: намерение, заголовок-вывод, блоки, данные
 Spec+Plan+strategy ─►[3 layout]─► SlideIR  абсолютные боксы, стили из токенов, provenance
 SlideIR ─►[4 render]─► .pptx ─► .pdf ─► .png ; .html
 SlideIR+.pptx+.png ─►[5 audit]─► Issue[] ─► UI ─► выбранные ─►[fix]─► 3→4→5
@@ -56,8 +58,15 @@ SlideIR+.pptx+.png ─►[5 audit]─► Issue[] ─► UI ─► выбранн
    ограниченным числом повторов. Регулярки по свободному тексту запрещены.
 8. «Готово» не заявляется без зелёных гейтов и прохода по критериям приёмки.
 9. Фаза, добавляющая вызовы модели, завершается замером времени по этапам —
-   в `progress/handoff.md`. Бюджет пять минут на колоду проверяется цифрами
-   после каждого такого шага, а не один раз в конце.
+   в `progress/handoff.md`. Бюджет пять минут на колоду — **вместе с разбором
+   входа** — проверяется цифрами после каждого такого шага, а не один раз в
+   конце.
+10. Цифры на слайдах — только из входа. Число, которого во входе нет,
+   отбрасывается при разборе (`content/grounding.py`) и ловится аудитом
+   (`content.undeclared_number`).
+11. Живая модель доступна только из GitHub Actions (`llm-probe.yml`, секрет
+   `LLM_API_KEY`); из среды разработки — нет. Результат живого прогона
+   забирается из лога (`get_job_logs`), артефакты недоступны.
 
 ## Документы
 

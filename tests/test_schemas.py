@@ -314,8 +314,12 @@ def test_manifest_reports_time_budget():
     assert manifest.within_budget(3) is False
 
 
-def test_run_summary_checks_generation_not_parsing():
-    """A18: 300 с — на генерацию трёх вариантов вместе, разбор входа отдельно."""
+def test_run_summary_counts_input_parsing_in_the_budget():
+    """300 с — на всю колоду: разбор входа входит в бюджет вместе с генерацией.
+
+    Разбор входа теперь вызов модели (приведение любого входа к контент-
+    пакету), и заказчик считает его частью времени на колоду.
+    """
     from datetime import UTC, datetime
 
     from deckwright.schemas import RunSummary
@@ -334,6 +338,7 @@ def test_run_summary_checks_generation_not_parsing():
             budget_seconds=300,
         )
 
-    # Долгий разбор не выводит за бюджет: ограничения по нему нет.
-    assert summary(parse=120.0, generation=290.0).within_budget is True
+    assert summary(parse=40.0, generation=250.0).within_budget is True
+    # Генерация в бюджете, но вместе с разбором входа — нет.
+    assert summary(parse=120.0, generation=290.0).within_budget is False
     assert summary(parse=0.1, generation=301.0).within_budget is False

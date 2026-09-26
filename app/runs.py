@@ -22,9 +22,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from deckwright.config import Config
+from deckwright.content.ingest import IngestInput, ingest
 from deckwright.llm.base import StructuredClient
 from deckwright.pipeline import PipelineResult, apply_selection, run_variant
-from deckwright.schemas import ContentPack
+from deckwright.schemas import ContentPack, DeckPurpose
 
 
 @dataclass
@@ -52,6 +53,11 @@ class RunState:
     finished: bool = False
     error: str | None = None
     started_monotonic: float = field(default_factory=time.monotonic)
+    # Вход, приведённый к контент-пакету, и что при этом отброшено.
+    stage: str = "ожидает"
+    pack: ContentPack | None = None
+    ingest_seconds: float = 0.0
+    ingest_warnings: list[str] = field(default_factory=list)
 
     @property
     def elapsed(self) -> float:
@@ -83,7 +89,7 @@ def latest() -> RunState | None:
 
 def start(
     template_path: str | Path,
-    pack: ContentPack,
+    request: IngestInput | ContentPack,
     cfg: Config,
     client: StructuredClient,
     variants: list[str],
@@ -108,6 +114,18 @@ def start(
         prepared = None
         text_findings = None
         try:
+            # Разбор входа — внутри прогона и внутри его секундомера: бюджет
+            # в пять минут считается на всю колоду, вместе с ним.
+            if isinstance(request, ContentPack):
+                pack = request
+            else:
+                state.stage = "разбираю вход"
+                ingested = ingest(request, client, default_purpose=DeckPurpose(cfg.deck.purpose))
+                pack = ingested.pack
+                state.ingest_warnings = ingested.warnings
+            state.pack = pack
+            state.ingest_seconds = state.elapsed
+            state.stage = "собираю варианты"
             for name in variants:
                 variant_state = state.variants[name]
 
@@ -139,6 +157,7 @@ def start(
                     variant_state.stage = "прервано"
         finally:
             state.finished = True
+            state.stage = "готово" if state.error is None else "прервано"
 
     threading.Thread(target=work, name=f"deckwright-{run_id}", daemon=True).start()
     return state
