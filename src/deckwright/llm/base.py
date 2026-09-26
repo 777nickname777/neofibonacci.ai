@@ -21,6 +21,7 @@ T = TypeVar("T", bound=BaseModel)
 # и `audit_deck`.
 STEPS = frozenset(
     {
+        "ingest_content",  # приведение входа к контент-пакету
         "plan_deck",  # планирование колоды
         "audit_slide",  # контекстный вопрос по картинке слайда
         "audit_deck",  # контекстный вопрос по тексту колоды

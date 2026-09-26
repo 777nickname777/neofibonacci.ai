@@ -42,7 +42,7 @@ from deckwright.layout.text_metrics import metrics_for_spec
 from deckwright.llm.base import StructuredClient
 from deckwright.parse.opener import parse_template
 from deckwright.plan.budget import LengthBudget, compute_budget
-from deckwright.plan.planner import Prompt, build_plan
+from deckwright.plan.planner import Prompt, build_plan, slide_count_text
 from deckwright.render.html import export_html
 from deckwright.render.package_check import check_package
 from deckwright.render.pdf import pptx_to_pdf
@@ -637,7 +637,9 @@ def run_variant(
         if token.usage_count > 0 and not token.embedded and token.family != source.requested
     )
 
-    slide_count = cfg.deck.slide_count or cfg.deck.min_slides
+    slide_count = slide_count_text(
+        cfg.deck.slide_count, cfg.deck.min_slides, cfg.deck.max_slides
+    )
     with _timed(manifest, "plan", on_stage):
         if prepared is not None:
             plan, prompt, budget = prepared.plan, prepared.prompt, prepared.budget

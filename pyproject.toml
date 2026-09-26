@@ -21,7 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.0.1", "ruff==0.15.1"]
+# fpdf2 — только генератор PDF-входа для тестов (tests/fixtures/make_inputs.py):
+# LibreOffice в образе без Writer и docx в PDF не переводит.
+dev = ["pytest==9.0.1", "ruff==0.15.1", "fpdf2==2.8.3"]
 
 [project.scripts]
 deckwright = "deckwright.cli:main"

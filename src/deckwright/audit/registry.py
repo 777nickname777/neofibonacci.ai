@@ -202,6 +202,12 @@ CHECKS: tuple[Check, ...] = (
         "Число не подтверждается контент-пакетом",
     ),
     _det(
+        "content.undeclared_number",
+        IssueCategory.CONTENT,
+        Severity.ERROR,
+        "На слайде число, которого нет во входе",
+    ),
+    _det(
         "content.derived_figure_wrong",
         IssueCategory.CONTENT,
         Severity.ERROR,

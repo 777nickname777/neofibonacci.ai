@@ -6,8 +6,7 @@
 
 Промпт живёт отдельным версионируемым файлом в `prompts/` — в коде его нет.
 
-Фаза 5 добавит сюда разбор контент-пакета из файлов и привязку каждого числа к
-источнику. Сейчас `ContentPack` приходит готовым.
+Контент-пакет приходит готовым: разбор входа — слой `content`.
 """
 
 from __future__ import annotations
@@ -85,10 +84,35 @@ def _format_series(pack: ContentPack) -> str:
     return "\n".join(lines)
 
 
+def _format_quotes(pack: ContentPack) -> str:
+    if not pack.quotes:
+        return "(цитат не предоставлено)"
+    lines = []
+    for quote in pack.quotes:
+        who = ", ".join(part for part in (quote.author, quote.role) if part)
+        lines.append(f"- [{quote.id}] «{quote.text}»" + (f" — {who}" if who else ""))
+    return "\n".join(lines)
+
+
+def slide_count_text(slide_count: int | None, min_slides: int, max_slides: int) -> str:
+    """Сколько слайдов просить: заданное число или диапазон ТЗ на выбор модели.
+
+    Число, заданное пользователем, — закон. Не задано — модель выбирает сама
+    в границах ТЗ (10–15) по объёму материала: брифу в две фразы хватит
+    нижней границы, отчёту на десять страниц нужна верхняя.
+    """
+    if slide_count:
+        return str(slide_count)
+    return (
+        f"от {min_slides} до {max_slides} (число выбери сам: чем меньше материала, "
+        f"тем ближе к {min_slides}; первый и последний слайды входят в счёт)"
+    )
+
+
 def build_plan(
     pack: ContentPack,
     client: StructuredClient,
-    slide_count: int,
+    slide_count: int | str,
     spec: TemplateSpec | None = None,
     max_bullets: int = 6,
     max_words_per_bullet: int = 15,
@@ -103,7 +127,7 @@ def build_plan(
     шаблона модель работает по одним порогам плотности из ТЗ — план тогда
     может не влезть, и разбираться с этим придётся фиттеру.
     """
-    prompt = load_prompt("plan_deck.v4", prompts_dir)
+    prompt = load_prompt("plan_deck.v5", prompts_dir)
     budget = (
         compute_budget(
             spec, max_bullets, max_words_per_bullet, substitution_slack=substitution_slack
@@ -130,6 +154,8 @@ def build_plan(
         goal=brief.goal or "не указана",
         language=brief.language,
         extra_instructions=brief.extra_instructions or "нет",
+        request=brief.request or "(не передан: материалы — документы)",
+        quotes=_format_quotes(pack),
         facts=_format_facts(pack),
         series=_format_series(pack),
         slide_count=slide_count,
