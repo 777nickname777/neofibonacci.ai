@@ -2080,9 +2080,29 @@ PR: https://github.com/Alikashp/presfiboforvk/pull/41 (ветка `claude/free-i
 * Живой прогон: `llm-probe.yml`, вход `new_inputs` = `true` (4 × 4 подряд)
   или `вход:шаблон`. В логе по каждой паре: строки `[вход]`/`[прогон]`,
   блоки `----- НАЧАЛО audit|run-summary.json|pack.json|plan.json -----`.
-  Разбор лога и пересборка колод по живым планам — скрипты из scratchpad
-  сессии (в репозиторий не входят): вырезать блоки, собрать колоды
-  `deckwright run --content pack.json --recorded <каталог с plan_deck.json>`.
+  Разбор лога и пересборка колод — скрипты в `scripts/` (см. ниже).
+
+### Как проверить живой прогон новых входов
+
+1. Лог задачи «живой вызов» — целиком: `get_job_logs` с `return_content` и
+   большим `tail_lines` (≥ 20000; по умолчанию 500, и заголовки первых пар
+   обрезаются), или «View raw logs» в GitHub. Сохранить в файл.
+2. Разложить по парам и получить таблицу времени и ошибок аудита:
+   `python scripts/probe_harvest.py ЛОГ out/probe-pairs`
+   → `out/probe-pairs/<вход>/<шаблон>/{audit,run-summary,pack,plan}.json`,
+   `cli.txt`. Если лог обрезан сверху, у первой пары нет строки
+   `===== ПРОГОН … =====` — дописать её вручную в начало файла.
+3. Собрать колоды по живым планам локально (без ключа; контекстный аудит
+   не идёт, картинки — отсюда, цифры аудита и времени — из шага 2):
+   `bash scripts/probe_rebuild.sh out/probe-pairs out/probe-decks`
+   → `out/probe-decks/<вход>/<шаблон>/<вариант>/png/*.png`.
+4. Листы: по варианту —
+   `python scripts/contact_sheet.py out/probe-decks/docx/vk_tech/balanced/png лист.png "docx × vk_tech · balanced"`,
+   склейка нескольких — `python scripts/contact_sheet.py --stack итог.png лист1.png лист2.png`.
+   Листы для PR — в `outputs/review/<тема>/` (`git add -f`), до 1400 px по ширине.
+
+Проверено на логе пробного прогона: разбор даёт «docx × vk_tech | 85.5 |
+328.7 | ВНЕ | 3», пересборка по живому плану — 3 варианта за 76 с локально.
 
 ### Пробный живой прогон docx × vk_tech (run 36267225113)
 
