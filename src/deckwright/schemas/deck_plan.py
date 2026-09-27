@@ -208,6 +208,28 @@ class SlidePlan(BaseModel):
     # Числа, вынесенные на слайд, с их происхождением.
     figures: list[Figure] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_empty_blocks(cls, data):
+        """Блок без содержания — `{"id": "b14", "kind": "paragraph"}` — отбрасывается.
+
+        Живой план на `vk_tech` отдал такие блоки на разделителе и финале, и
+        весь план ушёл на повтор: 42 с из бюджета за блок, верстать который
+        всё равно нечего. Слайд без блоков остаётся под проверкой ниже.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("blocks"), list):
+            return data
+        payload = ("items", "series_ids", "fact_ids", "quote_id", "image_prompt", "heading",
+                   "table", "text")
+        kept = [
+            block
+            for block in data["blocks"]
+            if not isinstance(block, dict) or any(block.get(key) for key in payload)
+        ]
+        if len(kept) == len(data["blocks"]):
+            return data
+        return {**data, "blocks": kept}
+
     @model_validator(mode="after")
     def _body_slides_have_content(self) -> SlidePlan:
         # Титул, разделитель и финал законно состоят из одного заголовка.

@@ -253,6 +253,21 @@ def test_plan_block_text_field_is_an_item():
     assert block.items == ["Рост"]
 
 
+def test_empty_plan_block_is_dropped_not_retried():
+    """Пустой блок на разделителе живого плана `vk_tech` стоил повтора (42 с)."""
+    from deckwright.schemas import SlidePlan
+
+    slide = SlidePlan.model_validate(
+        {
+            "index": 9,
+            "intent": "section",
+            "takeaway_title": "Планы на IV квартал",
+            "blocks": [{"id": "b14", "kind": "paragraph"}],
+        }
+    )
+    assert slide.blocks == []
+
+
 # ── 7. Фото донора — место под картинку, а не содержание ────────────────────
 
 
