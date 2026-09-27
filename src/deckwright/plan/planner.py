@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from deckwright.llm.base import StructuredClient
 from deckwright.plan.budget import LengthBudget, compute_budget
-from deckwright.schemas import ContentPack, DeckPlan, PromptVersion, TemplateSpec
+from deckwright.schemas import BlockKind, ContentPack, DeckPlan, PromptVersion, TemplateSpec
 
 PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts"
 
@@ -162,7 +162,7 @@ def build_plan(
         length_limits=limits,
     )
     plan = client.complete(step=prompt.step, prompt=text, schema=DeckPlan)
-    return resolve_quotes(plan, pack), prompt, budget
+    return resolve_facts(resolve_quotes(plan, pack), pack), prompt, budget
 
 
 def resolve_quotes(plan: DeckPlan, pack: ContentPack) -> DeckPlan:
@@ -182,4 +182,26 @@ def resolve_quotes(plan: DeckPlan, pack: ContentPack) -> DeckPlan:
                 continue
             who = ", ".join(part for part in (quote.author, quote.role) if part)
             block.items = [f"«{quote.text}»"] + ([f"— {who}"] if who else [])
+    return plan
+
+
+# Блоки, чей текст — строки пунктов. У графика, таблицы, KPI и картинки
+# содержимое другое, и текст фактов в них подставлять нельзя.
+_TEXT_BLOCKS = (BlockKind.PARAGRAPH, BlockKind.BULLETS, BlockKind.STEPS)
+
+
+def resolve_facts(plan: DeckPlan, pack: ContentPack) -> DeckPlan:
+    """Текстовый блок, где у модели есть только `fact_ids`, получает текст фактов.
+
+    Живой прогон pdf × vk_tech: у слайда-решения один абзац с `fact_ids` и
+    без строк — слайд выходил пустым во всех трёх вариантах. Текст факта
+    взят из входа и уже сверен, так что подставлять его безопасно.
+    """
+    facts = {fact.id: fact for fact in pack.facts}
+    plan = plan.model_copy(deep=True)
+    for slide in plan.slides:
+        for block in slide.blocks:
+            if block.kind not in _TEXT_BLOCKS or block.items:
+                continue
+            block.items = [facts[fact_id].text for fact_id in block.fact_ids if fact_id in facts]
     return plan

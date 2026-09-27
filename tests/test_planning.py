@@ -266,3 +266,25 @@ def test_planner_is_told_how_long_the_cover_and_closing_may_be():
     assert "титульный слайд: заголовок не длиннее 60 символов" in lines
     assert "места под подзаголовок нет — только заголовок" in lines
     assert "завершающий слайд: подзаголовок под ним — один абзац не длиннее 90" in lines
+
+
+def test_figure_citing_a_series_point_is_checked_against_the_series(pack):
+    """Живой план: число с графика ссылается на ряд, а не на факт.
+
+    Раньше такое число объявлялось ссылкой «на отсутствующие факты», хотя
+    точка ряда во входе есть.
+    """
+    assert verify(Figure(text="21 мин", kind=FigureKind.CITED, fact_ids=["ser_mttd"]), pack) is None
+    problem = verify(Figure(text="30 мин", kind=FigureKind.CITED, fact_ids=["ser_mttd"]), pack)
+    assert problem and "таких значений нет" in problem
+    derived = Figure(
+        text="33 мин", kind=FigureKind.DERIVED, fact_ids=["ser_mttd"], formula="42 - 9"
+    )
+    assert verify(derived, pack) is None
+
+
+def test_cited_figure_sign_is_direction_not_value(pack):
+    """«−23 %» на слайде для факта «снизилось на 23 %» — то же число."""
+    fact = pack.facts[0]
+    figure = Figure(text=f"-{fact.value:g}", kind=FigureKind.CITED, fact_ids=[fact.id])
+    assert verify(figure, pack) is None
