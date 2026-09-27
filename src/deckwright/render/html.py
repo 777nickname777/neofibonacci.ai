@@ -26,6 +26,7 @@ import html
 from pathlib import Path
 
 from deckwright.schemas import DeckIR, Element, ElementKind, SlideIR
+from deckwright.visuals.charts import format_value
 
 # Ширина слайда на странице в пикселях — для браузеров без поддержки
 # контейнерных единиц. Современные пересчитают всё в `cqw` и отмасштабируют.
@@ -169,14 +170,16 @@ def _chart_svg(element: Element) -> str:
             bars.append(
                 f'<rect x="{x:.2f}" y="{y:.2f}" '
                 f'width="{bar:.2f}" height="{bar_height:.2f}" fill="#{fill}">'
-                f"<title>{_escape(series.name)}: {value:g}</title></rect>"
+                f"<title>{_escape(series.name)}: "
+                f"{format_value(value, values, chart.language)}</title></rect>"
             )
             if chart.show_values:
                 unit = f" {chart.unit}" if chart.unit else ""
                 bars.append(
                     f'<text x="{x + bar / 2:.2f}" y="{y - label_size * 0.4:.2f}" '
                     f'font-size="{label_size:.2f}" font-weight="bold" text-anchor="middle" '
-                    f'fill="#{fill}">{value:g}{_escape(unit)}</text>'
+                    f'fill="#{fill}">{format_value(value, values, chart.language)}'
+                    f"{_escape(unit)}</text>"
                 )
             index += 1
 

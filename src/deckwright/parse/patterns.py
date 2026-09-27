@@ -51,6 +51,8 @@ A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 # Шаги повторителя, отличающиеся меньше чем на эту долю, считаются равными.
 PITCH_TOLERANCE = 0.08
+# Две фигуры ближе этого друг к другу — одно место: копии стопкой.
+STACK_TOLERANCE_EMU = 18_288  # 0.02″
 
 # Меньше этого числа одинаковых элементов — совпадение, а не сетка.
 MIN_REPEAT = 2
@@ -465,7 +467,11 @@ def _find_repeaters(
             continue
         if any(id(shape.element) in consumed for shape in members):
             continue
-        members = _without_stray(members)
+        stacked = _stacked_copies(members)
+        consumed.update(id(shape.element) for shape in stacked)
+        members = _without_stray([shape for shape in members if shape not in stacked])
+        if len(members) < MIN_REPEAT:
+            continue
         horizontal = sorted(members, key=lambda s: s.box.x)
         vertical = sorted(members, key=lambda s: s.box.y)
 
@@ -545,6 +551,29 @@ def _find_repeaters(
         consumed.update(id(text.element) for texts in held for text in texts)
 
     return _with_frames(_merge_repeaters(repeaters), frames), consumed
+
+
+def _stacked_copies(members: list[_Shape]) -> list[_Shape]:
+    """Копии, лежащие стопкой в том же месте: элемент один, а не несколько.
+
+    На `vk_tech` под каждой из двух карточек слайда 22 — три одинаковые
+    подложки ровно друг на друге. Они читались шестью элементами сетки 2×2 со
+    смещениями (0, 0), (0, 0), (Δx, Δy), (Δx, Δy), и два пункта списка
+    садились в одно место — наложение на 100 %. Остаётся первая фигура места.
+    """
+    tolerance = STACK_TOLERANCE_EMU
+    kept: list[_Shape] = []
+    copies: list[_Shape] = []
+    for shape in members:
+        if any(
+            abs(shape.box.x - other.box.x) <= tolerance
+            and abs(shape.box.y - other.box.y) <= tolerance
+            for other in kept
+        ):
+            copies.append(shape)
+        else:
+            kept.append(shape)
+    return copies
 
 
 def _texts_on(frame: _Shape, shapes: list[_Shape], consumed: set[int]) -> list[_Shape]:

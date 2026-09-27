@@ -210,6 +210,51 @@ def test_table_restating_a_series_is_drawn_as_that_series(roadmap_decks):
     assert len({c.rgb for c in charts[0].point_colors}) > 1, "у каждой доли свой цвет"
 
 
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_chart_numbers_are_never_scientific_or_rounded(roadmap_decks, variant):
+    """Каждый график: ось и подписи — без «1E+06» и без округления 14,2 до 14."""
+    formats = []
+    for slide in Presentation(str(roadmap_decks[variant].pptx)).slides:
+        for shape in slide.shapes:
+            if not shape.has_chart:
+                continue
+            chart = shape.chart
+            plot = chart.plots[0]
+            assert plot.has_data_labels
+            formats.append(plot.data_labels.number_format)
+            if chart.chart_type != XL_CHART_TYPE.DOUGHNUT:
+                axis = chart.value_axis.tick_labels
+                assert axis.number_format != "General" and not axis.number_format_is_linked
+    assert formats and all(f.startswith("[$-419]#,##0") for f in formats), formats
+    assert any("#,##0.0" in f for f in formats), "у выручки 14,2 — знак после запятой"
+    html = roadmap_decks[variant].html.read_text("utf-8")
+    assert "e+0" not in html and "41\u00a0380" in html
+
+
+def test_number_formats_follow_the_data():
+    from deckwright.visuals.charts import format_value, number_format
+
+    assert number_format([14.2, 18.0], "млн руб.", "ru") == '[$-419]#,##0.0"\u00a0млн руб."'
+    assert number_format([41380, 49720]) == "#,##0"
+    assert number_format([1_200_000, 3_400_000], "руб.") == '#,##0.0,,"\u00a0млн руб."'
+    assert format_value(41380, [41380], "ru") == "41\u00a0380"
+    assert format_value(1_200_000, [1_200_000], "ru") == "1,2\u00a0млн"
+
+
+def test_unit_abbreviation_is_not_a_number():
+    """«Выручка (млн руб.)» — единица, а не миллион: аудит находил «1e+06»."""
+    from deckwright.content.grounding import word_numbers
+
+    assert word_numbers("Выручка (млн руб.)") == set()
+    assert word_numbers("пять млн") == {5_000_000}
+    assert word_numbers("тысячи клиентов") == {1000}
+
+
+def test_sales_deck_has_no_undeclared_numbers(roadmap_decks):
+    for result in roadmap_decks.values():
+        assert not [i for i in result.audit.issues if i.check_id == "content.undeclared_number"]
+
+
 # ── 5. Фон — в test_blank_templates / test_audit ────────────────────────────
 # ── 6. Время по этапам ──────────────────────────────────────────────────────
 
@@ -338,3 +383,41 @@ def test_contextual_prompt_knows_the_deck_topic():
     prompt = load_prompt("audit_slide.v3")
     assert "{topic}" in prompt.template
     assert "content.visuals_on_topic" in prompt.template
+
+
+# ── Наложение пунктов на `vk_tech` (dense, живой план run 28) ───────────────
+
+
+def test_stacked_copies_are_one_repeater_member():
+    """Три подложки стопкой под карточкой — один элемент сетки, а не три."""
+    for name in (
+        "data/templates/vk_tech.pptx",
+        "data/templates/vk_workspace.pptx",
+        "data/templates/vk_education.pptx",
+        "data/holdout/zelenie_investicii.pptx",
+        "data/holdout/dorozhnaya_karta.pptx",
+        "data/holdout/podgotovka_k_ekzamenam.pptx",
+    ):
+        path = ROOT / name
+        if not path.exists():
+            continue
+        for pattern in parse_template(path).patterns:
+            for repeater in pattern.repeaters:
+                offsets = repeater.member_offsets
+                assert len(set(offsets)) == len(offsets), (name, pattern.id, offsets)
+
+
+def test_vk_tech_dense_items_do_not_overlap(tmp_path):
+    template = ROOT / "data" / "templates" / "vk_tech.pptx"
+    if not template.exists():
+        pytest.skip("нет vk_tech")
+    source = Path(__file__).parent / "fixtures" / "vk_tech_sales"
+    result = run_variant(
+        template_path=template,
+        pack=ContentPack.model_validate(json.loads((source / "pack.json").read_text("utf-8"))),
+        cfg=load_config(CONFIG),
+        client=RecordedClient(source / "recorded"),
+        variant="dense",
+        output_dir=tmp_path / "dense",
+    )
+    assert not [i for i in result.audit.issues if i.check_id == "layout.overlap"]

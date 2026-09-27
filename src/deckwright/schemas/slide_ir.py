@@ -102,6 +102,9 @@ class ChartContent(BaseModel):
     # Цвета секторов кольца или круга: у него ряд один, а цвет нужен каждой
     # доле. Пусто — цвет ряда.
     point_colors: list[Color] = Field(default_factory=list)
+    # Язык колоды: по нему числа графика пишутся «41 380» и «14,2», а не
+    # «41,380» и «14.2» — формат числа несёт локаль, а не берёт её из системы.
+    language: str = ""
 
     @model_validator(mode="after")
     def _series_match_categories(self) -> ChartContent:

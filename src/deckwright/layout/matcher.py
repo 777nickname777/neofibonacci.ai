@@ -54,6 +54,7 @@ from deckwright.schemas import (
     SlotRole,
     SourceKind,
     TableContent,
+    TableData,
     TemplateSpec,
     TextContent,
     TextStyle,
@@ -62,7 +63,7 @@ from deckwright.schemas import (
     required_contrast,
 )
 from deckwright.schemas.common import LARGE_TEXT_PT
-from deckwright.visuals.charts import series_from_pack, series_unit
+from deckwright.visuals.charts import format_value, series_from_pack, series_unit
 
 # Намерения, которым хватает одного заголовка.
 _BARE_INTENTS = frozenset({SlideIntent.TITLE, SlideIntent.SECTION, SlideIntent.CLOSING})
@@ -1773,6 +1774,7 @@ def _data_element(
                     show_values=single,
                     title=title,
                     point_colors=brand if parts else [],
+                    language=pack.brief.language,
                 ),
             )
 
@@ -2723,7 +2725,9 @@ def build_deck_ir(
     mine: dict[int, str] = {}
     sections = _sections(plan)
     for plan_slide in plan.slides:
-        plan_slide = _tables_as_series(_heading_as_subtitle(spec, plan_slide), pack)
+        plan_slide = _mixed_units_as_table(
+            _tables_as_series(_heading_as_subtitle(spec, plan_slide), pack), pack
+        )
         avoid = {chosen[plan_slide.index] for chosen in others if plan_slide.index in chosen}
         built, found = _slides_for(
             spec, plan_slide, strategy, metrics, ladders, font_family, used, pack, avoid,
@@ -2796,6 +2800,49 @@ def _tables_as_series(plan_slide: SlidePlan, pack) -> SlidePlan:
                 update={"kind": BlockKind.SERIES, "series_ids": [series_id], "table": None}
             )
         )
+    return plan_slide.model_copy(update={"blocks": blocks}) if changed else plan_slide
+
+
+def _mixed_units_as_table(plan_slide: SlidePlan, pack) -> SlidePlan:
+    """Блок из рядов разных единиц — таблицей «категория × ряд».
+
+    Выручка в млн руб., число чеков и средний чек в руб. на одной оси: ось
+    до 60 000, и выручки не видно вовсе (шаблон экзаменов, airy). Числа
+    таблицы — из пакета, как у графика; единица — в шапке колонки.
+    """
+    if pack is None:
+        return plan_slide
+    known = {series.id: series for series in getattr(pack, "series", [])}
+    blocks = []
+    changed = False
+    for block in plan_slide.blocks:
+        chosen = [known[sid] for sid in block.series_ids if sid in known]
+        if (
+            block.kind is not BlockKind.SERIES
+            or len(chosen) < 2
+            or len({series.unit for series in chosen}) < 2
+            or any(series.categories != chosen[0].categories for series in chosen)
+        ):
+            blocks.append(block)
+            continue
+        language = pack.brief.language
+        columns = [""] + [
+            f"{series.name}, {series.unit}" if series.unit else series.name for series in chosen
+        ]
+        rows = [
+            [label]
+            + [format_value(series.values[i], series.values, language) for series in chosen]
+            for i, label in enumerate(chosen[0].categories)
+        ]
+        blocks.append(
+            block.model_copy(
+                update={
+                    "kind": BlockKind.TABLE,
+                    "table": TableData(columns=columns, rows=rows),
+                }
+            )
+        )
+        changed = True
     return plan_slide.model_copy(update={"blocks": blocks}) if changed else plan_slide
 
 
@@ -3139,11 +3186,49 @@ def _slides_for(
     # десяти слайдов до пятнадцати и число находок с шести до одиннадцати.
     if cramped:
         if any(_cramped_data(half, spec) for half in halves) or len(remaining) > len(issues):
-            return [slide], issues
+            return _roomier(
+                spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+                avoid, sections, slide, issues,
+            )
         return halves, remaining
     if len(remaining) >= len(issues):
         return [slide], issues
     return halves, remaining
+
+
+def _roomier(
+    spec: TemplateSpec,
+    plan_slide: SlidePlan,
+    strategy: Strategy,
+    metrics: FontMetrics | None,
+    ladders: dict[SlotRole, list[float]],
+    font_family: str,
+    used,
+    pack,
+    avoid: set[str] | None,
+    sections: list[str] | None,
+    slide: SlideIR,
+    issues: list[Issue],
+) -> tuple[list[SlideIR], list[Issue]]:
+    """Тот же слайд в другой композиции, где графику хватает места.
+
+    Деление не помогло: у половины с графиком тот же тесный остаток. На
+    шаблоне экзаменов график ложился полосой в 0.1–0.55″ под текстом. Здесь
+    слайд собирается заново, избегая уже опробованных композиций, пока график
+    не станет читаемым или композиции не кончатся; не вышло — остаётся первый.
+    """
+    tried = {slide.pattern_id or ""}
+    for _ in range(len(spec.patterns)):
+        other, found = build_slide_ir(
+            spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+            (avoid or set()) | tried, sections,
+        )
+        if not _cramped_data(other, spec):
+            return [other], found
+        if (other.pattern_id or "") in tried:
+            break
+        tried.add(other.pattern_id or "")
+    return [slide], issues
 
 
 def _cramped_data(slide: SlideIR, spec: TemplateSpec) -> bool:

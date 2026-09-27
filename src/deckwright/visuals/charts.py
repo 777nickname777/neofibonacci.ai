@@ -93,6 +93,7 @@ def add_chart(slide, box: Box, content: ChartContent):
             chart.legend.font.size = Pt(content.label_style.size_pt)
 
     _paint(chart, content)
+    _format_value_axis(chart, content)
     if content.title:
         chart.has_title = True
         frame_title = chart.chart_title.text_frame
@@ -110,12 +111,81 @@ def add_chart(slide, box: Box, content: ChartContent):
     return frame
 
 
+# Знаков после запятой в подписях — не больше, сколько бы их ни было в данных.
+_MAX_DECIMALS = 2
+# С этого значения ось и подписи пишутся в миллионах: «1,2 млн», а не 1E+06.
+_MILLION = 1_000_000
+
+
+def _values(content: ChartContent) -> list[float]:
+    return [value for series in content.series for value in series.values]
+
+
+# Локаль в коде формата: «[$-419]» — русская запись чисел в любом редакторе.
+_LOCALE = {"ru": "[$-419]", "en": "[$-409]", "de": "[$-407]", "fr": "[$-40C]"}
+
+
+def number_format(values: list[float], unit: str = "", language: str = "") -> str:
+    """Формат чисел графика по самим данным: без научной записи и без округления.
+
+    Формат `0` писал 14,2 и 15,1 млн руб. как «14» и «15», а `General` на
+    видимой оси даёт «1E+06». Здесь — разделитель тысяч (`#,##0`: в русской
+    локали это пробел), столько знаков после запятой, сколько их в данных, а
+    миллионы — «1,2 млн», если единица сама не содержит множителя.
+    """
+    decimals = 0
+    for value in values:
+        text = f"{value:.{_MAX_DECIMALS}f}".rstrip("0").rstrip(".")
+        if "." in text:
+            decimals = max(decimals, len(text.split(".")[1]))
+    body = "#,##0" + ("." + "0" * decimals if decimals else "")
+    suffix = unit.strip()
+    if values and max(abs(v) for v in values) >= _MILLION and not suffix.startswith(
+        ("млн", "млрд", "тыс")
+    ):
+        # Две запятые после разряда — деление на миллион в самом формате.
+        body = "#,##0.0,,"
+        suffix = f"млн {suffix}".strip()
+    locale = _LOCALE.get(language, "")
+    return f'{locale}{body}"\u00a0{suffix}"' if suffix else f"{locale}{body}"
+
+
+def format_value(value: float, values: list[float], language: str = "") -> str:
+    """Число графика строкой по тем же правилам, что `number_format`.
+
+    Нужно HTML-экспорту: `f"{value:g}"` писал «41380» и «1e+06».
+    """
+    decimals = 0
+    for item in values:
+        text = f"{item:.{_MAX_DECIMALS}f}".rstrip("0").rstrip(".")
+        if "." in text:
+            decimals = max(decimals, len(text.split(".")[1]))
+    suffix = ""
+    if values and max(abs(v) for v in values) >= _MILLION:
+        value, decimals, suffix = value / _MILLION, 1, "\u00a0млн"
+    text = f"{value:,.{decimals}f}"
+    if language == "ru":
+        text = text.replace(",", "\u00a0").replace(".", ",")
+    return text + suffix
+
+
+def _format_value_axis(chart, content: ChartContent) -> None:
+    """Подписи оси значений — тем же форматом, что и значения, даже скрытой оси."""
+    try:
+        axis = chart.value_axis
+    except ValueError:
+        # У кольца и круга оси значений нет.
+        return
+    axis.tick_labels.number_format = number_format(_values(content), "", content.language)
+    axis.tick_labels.number_format_is_linked = False
+
+
 def _label_parts(chart, content: ChartContent) -> None:
     """Доли подписаны значением на секторе: без оси их не прочитать иначе."""
     plot = chart.plots[0]
     plot.has_data_labels = True
     labels = plot.data_labels
-    labels.number_format = f'0.#" {content.unit}"' if content.unit else "0.#"
+    labels.number_format = number_format(_values(content), content.unit, content.language)
     labels.number_format_is_linked = False
     labels.show_value = True
     if content.label_style is not None:
@@ -180,7 +250,7 @@ def _emphasize(chart, content: ChartContent) -> None:
     if content.show_values:
         plot.has_data_labels = True
         labels = plot.data_labels
-        labels.number_format = f'0" {content.unit}"' if content.unit else "0"
+        labels.number_format = number_format(_values(content), content.unit, content.language)
         labels.number_format_is_linked = False
         labels.position = XL_LABEL_POSITION.OUTSIDE_END
         if content.label_style is not None:

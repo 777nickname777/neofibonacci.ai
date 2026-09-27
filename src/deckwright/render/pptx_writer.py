@@ -911,6 +911,18 @@ def _drop_unfilled_subtitle(slide, pattern, leftovers: list[tuple[Box, object]])
     return removed
 
 
+def _has_outline(element) -> bool:
+    """Видимая обводка фигуры: карточка шаблона экзаменов — жёлтая рамка без
+    заливки. Без этого пустая карточка не считалась панелью и оставалась
+    «жёлтым прямоугольником-заглушкой» (модель аудита, run 31)."""
+    for line in element.xpath("./*[local-name()='spPr']/*[local-name()='ln']"):
+        if line.xpath("./*[local-name()='noFill']"):
+            continue
+        if line.xpath("./*[local-name()='solidFill' or local-name()='gradFill']"):
+            return True
+    return False
+
+
 def _has_fill(element) -> bool:
     return any(
         etree.QName(child).localname in _FILLS
@@ -992,7 +1004,9 @@ def _drop_emptied_panels(
             continue
         # Картинка — тоже подложка: на `vk_tech` серая панель под рыбной
         # таблицей нарисована картинкой.
-        if etree.QName(element).localname == "sp" and not _has_fill(element):
+        if etree.QName(element).localname == "sp" and not (
+            _has_fill(element) or _has_outline(element)
+        ):
             continue
         if not any(_inside(text, box) for text in donor_text):
             continue
