@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from deckwright.audit import rewrite as rewrite_step
-from deckwright.audit.contextual.runner import SharedTextPass
+from deckwright.audit.contextual.runner import SharedAudit
 from deckwright.audit.fixers import apply as apply_fixes
 from deckwright.audit.report import audit_deck
 from deckwright.config import Config
@@ -145,8 +145,8 @@ class _RunContext:
     vlm_client: StructuredClient | None
     # Находки текстового прохода: он идёт по плану, а план у вариантов один.
     # Заполняется после первого аудита и переезжает в следующий вариант; у
-    # вариантов, идущих параллельно, — общий `SharedTextPass`.
-    text_findings: list[Issue] | SharedTextPass | None = None
+    # вариантов, идущих параллельно, — общий `SharedAudit`.
+    text_findings: list[Issue] | SharedAudit | None = None
     # Куда сообщать о начале этапа. Нужно интерфейсу: прогон идёт минуты.
     on_stage: Callable[[str], None] | None = None
     # Реестр композиций вариантов из `PreparedPlan`: пересборка после правки
@@ -627,7 +627,7 @@ def lay_out_variant(
     vlm_client: StructuredClient | None = None,
     fix_mode: str | None = None,
     prepared: PreparedPlan | None = None,
-    text_findings: list[Issue] | SharedTextPass | None = None,
+    text_findings: list[Issue] | SharedAudit | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> LaidOut:
     """Разбор шаблона, план и раскладка одного варианта.

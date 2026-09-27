@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 
-from deckwright.audit.contextual.runner import SharedTextPass
+from deckwright.audit.contextual.runner import SharedAudit
 from deckwright.config import load_config
 from deckwright.content.ingest import IngestError, IngestInput, ingest
 from deckwright.content.readers import UnsupportedInput
@@ -150,7 +150,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # План от варианта не зависит: планируется один раз и переиспользуется —
     # иначе три одинаковых ответа модели стоят втрое дороже и втрое дольше.
     # Текстовый проход аудита идёт по плану и тоже задаётся один раз.
-    shared_text = SharedTextPass()
+    shared_audit = SharedAudit()
     prepared = None
     laid_out = []
     for variant in variants:
@@ -163,7 +163,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             output_dir=output_root / variant,
             fix_mode=args.fix,
             prepared=prepared,
-            text_findings=shared_text,
+            text_findings=shared_audit,
             vlm_client=vlm_client,
         )
         prepared = laid.prepared

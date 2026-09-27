@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from deckwright.audit.contextual.runner import SharedTextPass
+from deckwright.audit.contextual.runner import SharedAudit
 from deckwright.config import Config
 from deckwright.content.ingest import IngestInput, ingest
 from deckwright.llm.base import StructuredClient
@@ -121,7 +121,7 @@ def start(
         # оба считаются один раз. Раскладка — по очереди (вариант избегает
         # композиций предыдущих), сборка и аудит — параллельно, как в CLI.
         prepared = None
-        shared_text = SharedTextPass()
+        shared_audit = SharedAudit()
         try:
             # Разбор входа — внутри прогона и внутри его секундомера: бюджет
             # в пять минут считается на всю колоду, вместе с ним.
@@ -153,7 +153,7 @@ def start(
                     vlm_client=vlm_client,
                     fix_mode=fix_mode,
                     prepared=prepared,
-                    text_findings=shared_text,
+                    text_findings=shared_audit,
                     on_stage=on_stage,
                 )
                 prepared = laid.prepared

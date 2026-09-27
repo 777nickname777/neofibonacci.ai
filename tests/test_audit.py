@@ -1009,9 +1009,9 @@ def test_shared_text_pass_asks_the_model_once_for_parallel_variants():
     import time
     from concurrent.futures import ThreadPoolExecutor
 
-    from deckwright.audit.contextual.runner import SharedTextPass
+    from deckwright.audit.contextual.runner import SharedAudit
 
-    shared = SharedTextPass()
+    shared = SharedAudit()
     calls = []
     lock = threading.Lock()
 
@@ -1057,3 +1057,54 @@ def test_title_slide_is_not_asked_whether_it_has_content(clean):
     for index, prompt in prompts.items():
         asked = "content.has_content" in prompt
         assert asked == (intents[index] not in _BARE_INTENTS), index
+
+
+def test_identical_pages_of_parallel_variants_are_asked_once(
+    template_paths, pack, recorded_dir, tmp_path
+):
+    """Одинаковая картинка с тем же вопросом — один вызов на три варианта.
+
+    Лимит токенов в минуту общий на аккаунт: проход по картинкам трёх
+    вариантов упирался в него, хотя треть страниц у вариантов совпадает.
+    """
+    import hashlib
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from deckwright.audit.contextual.runner import SharedAudit
+    from deckwright.pipeline import complete_variant, lay_out_variant
+
+    class CountingVlm:
+        mocked = True
+
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.images: list[bytes] = []
+
+        def complete(self, step, prompt, schema, images=None):
+            if step == "audit_slide":
+                with self.lock:
+                    self.images.append(images[0])
+            return schema.model_validate({"answers": []})
+
+    cfg = load_config(CONFIG)
+    vlm = CountingVlm()
+    shared = SharedAudit()
+    client = RecordedClient(recorded_dir)
+    prepared = None
+    laid_out = []
+    for variant in ("dense", "balanced", "airy"):
+        laid = lay_out_variant(
+            template_path=template_paths[0], pack=pack, cfg=cfg, client=client,
+            variant=variant, output_dir=tmp_path / variant, prepared=prepared,
+            vlm_client=vlm, text_findings=shared, fix_mode="off",
+        )
+        prepared = laid.prepared
+        laid_out.append(laid)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(complete_variant, laid_out))
+
+    pages = [page.read_bytes() for result in results for page in result.pages]
+    asked = [hashlib.sha256(image).hexdigest() for image in vlm.images]
+    assert len(asked) == len(set(asked)), "одна и та же картинка спрошена дважды"
+    assert len(asked) <= len(pages)

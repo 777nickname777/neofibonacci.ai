@@ -20,9 +20,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,28 +73,57 @@ class ContextualResult:
     text_reused: bool = False
 
 
-class SharedTextPass:
-    """Текстовый проход, один на колоду, для вариантов, идущих параллельно.
+class SharedAudit:
+    """Вопросы модели, общие для вариантов одной колоды, идущих параллельно.
 
-    Вопросы прохода задаются по плану, а план у вариантов один. Пока варианты
-    шли по очереди, ответы первого просто передавались следующему. Параллельно
-    так нельзя: вариант, пришедший первым, задаёт вопрос, остальные ждут его
-    ответа на блокировке — а их проход по картинкам тем временем идёт.
+    Текстовый проход идёт по плану, а план у вариантов один: вариант,
+    пришедший первым, задаёт вопрос, остальные ждут его ответа на блокировке
+    — их проход по картинкам тем временем идёт.
+
+    Картинки у вариантов часто одинаковые: титул, финал, слайды одной
+    композиции (живой прогон `zelenie_investicii`: 26 разных страниц из 39).
+    Одна и та же картинка с тем же текстом вопроса — один вызов: лимит 40 000
+    токенов в минуту на аккаунт, и проход по картинкам трёх вариантов упирался
+    в него (≈140 с аудита на вариант).
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._done = False
         self._value: tuple[list[Issue], str] = ([], "")
+        self._slides: dict[str, Future] = {}
 
     def get(self, compute: Callable[[], tuple[list[Issue], str]]) -> tuple[list[Issue], str, bool]:
-        """Ответ прохода и признак «получен другим вариантом»."""
+        """Ответ текстового прохода и признак «получен другим вариантом»."""
         with self._lock:
             if self._done:
                 return (*self._value, True)
             self._value = compute()
             self._done = True
             return (*self._value, False)
+
+    def slide(self, key: str, compute: Callable[[], SlideAnswers]) -> SlideAnswers:
+        """Ответы по картинке: первый спросивший спрашивает, остальные ждут.
+
+        Отказ модели не разделяется: ждавший вариант спрашивает сам — иначе
+        одна сетевая ошибка стоила бы находок трёх вариантов.
+        """
+        with self._lock:
+            future = self._slides.get(key)
+            owner = future is None
+            if owner:
+                future = self._slides[key] = Future()
+        if owner:
+            try:
+                future.set_result(compute())
+            except Exception as failure:
+                future.set_exception(failure)
+                raise
+            return future.result()
+        try:
+            return future.result()
+        except Exception:
+            return compute()
 
 
 _BARE_INTENTS = (SlideIntent.TITLE, SlideIntent.SECTION)
@@ -158,6 +188,7 @@ def _image_pass(
     workers: int,
     prompts_dir: str | Path | None,
     only_slides: set[int] | None,
+    shared: SharedAudit | None = None,
 ) -> tuple[list[Issue], list[str]]:
     prompt = load_prompt("audit_slide.v1", prompts_dir)
     questions = _questions(check_ids)
@@ -182,10 +213,18 @@ def _image_pass(
                 else questions
             ),
         )
+        image = Path(page).read_bytes()
+
+        def call() -> SlideAnswers:
+            return client.complete("audit_slide", text, SlideAnswers, images=[image])
+
         try:
-            answers = client.complete(
-                "audit_slide", text, SlideAnswers, images=[Path(page).read_bytes()]
-            )
+            if shared is None:
+                answers = call()
+            else:
+                # Ключ — всё, что видит модель: картинка и текст вопроса.
+                key = hashlib.sha256(image + text.encode("utf-8")).hexdigest()
+                answers = shared.slide(key, call)
         except Exception as failure:  # отказ модели не должен ронять аудит
             return [], f"слайд {slide.index}: {failure}"
         found = [
@@ -261,7 +300,7 @@ def run(
     cfg,
     only_slides: set[int] | None = None,
     prompts_dir: str | Path | None = None,
-    text_findings: list[Issue] | SharedTextPass | None = None,
+    text_findings: list[Issue] | SharedAudit | None = None,
 ) -> ContextualResult:
     """Оба контекстных прохода. Невыполненное честно перечисляется.
 
@@ -298,7 +337,7 @@ def run(
     def text_part() -> tuple[list[Issue], str, bool]:
         if audit.text_checks_once_per_deck and isinstance(text_findings, list):
             return text_findings, "", True
-        if audit.text_checks_once_per_deck and isinstance(text_findings, SharedTextPass):
+        if audit.text_checks_once_per_deck and isinstance(text_findings, SharedAudit):
             return text_findings.get(compute)
         return (*compute(), False)
 
@@ -316,6 +355,7 @@ def run(
             cfg.vlm.max_concurrent_calls,
             prompts_dir,
             only_slides,
+            text_findings if isinstance(text_findings, SharedAudit) else None,
         )
         result.issues.extend(issues)
         if problems:
