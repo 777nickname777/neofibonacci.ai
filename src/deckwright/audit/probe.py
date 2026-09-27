@@ -147,7 +147,7 @@ def run(
     prompts_dir: str | Path | None = None,
 ) -> ProbeResult:
     """Прогоняет картиночный аудит и возвращает замеры."""
-    prompt = load_prompt("audit_slide.v1", prompts_dir)
+    prompt = load_prompt("audit_slide.v2", prompts_dir)
     questions = _questions(check_ids)
     result = ProbeResult()
 
