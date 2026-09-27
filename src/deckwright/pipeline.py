@@ -748,6 +748,7 @@ def lay_out_variant(
                 max_words_per_bullet=cfg.audit.max_words_per_bullet,
                 substitution_slack=cfg.fonts.substitution_slack,
                 block_limits=plan_limits(spec, cfg),
+                min_slides=cfg.deck.slide_count or cfg.deck.min_slides,
             )
             prepared = PreparedPlan(plan=plan, prompt=prompt, budget=budget)
     if budget is not None:

@@ -268,6 +268,20 @@ def test_empty_plan_block_is_dropped_not_retried():
     assert slide.blocks == []
 
 
+def test_cut_off_plan_is_an_invalid_answer():
+    """План из двух слайдов при «от 10 до 15» — обрыв, а не план (run 29)."""
+    from pydantic import ValidationError
+
+    from deckwright.plan.planner import _bounded
+
+    plan = json.loads((SALES / "recorded" / "plan_deck.json").read_text("utf-8"))
+    schema = _bounded(10)
+    assert len(schema.model_validate(plan).slides) == 13
+    plan["slides"] = plan["slides"][:2]
+    with pytest.raises(ValidationError, match="план оборван"):
+        schema.model_validate(plan)
+
+
 # ── 7. Фото донора — место под картинку, а не содержание ────────────────────
 
 

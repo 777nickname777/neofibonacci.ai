@@ -16,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from deckwright.llm.base import StructuredClient
 from deckwright.plan.budget import LengthBudget, compute_budget
@@ -119,6 +119,7 @@ def build_plan(
     substitution_slack: float = 0.8,
     prompts_dir: str | Path | None = None,
     block_limits: tuple[tuple[str, int, int], ...] = (),
+    min_slides: int = 0,
 ) -> tuple[DeckPlan, Prompt, LengthBudget | None]:
     """План, использованный промпт и бюджеты длины.
 
@@ -161,8 +162,35 @@ def build_plan(
         slide_count=slide_count,
         length_limits=limits,
     )
-    plan = client.complete(step=prompt.step, prompt=text, schema=DeckPlan)
+    plan = client.complete(step=prompt.step, prompt=text, schema=_bounded(min_slides))
+    plan = DeckPlan.model_validate(plan.model_dump())
     return resolve_facts(resolve_quotes(plan, pack), pack), prompt, budget
+
+
+def _bounded(min_slides: int) -> type[DeckPlan]:
+    """Схема ответа, где слишком короткий план — невалидный ответ.
+
+    Живой прогон `sales × vk_tech` (run 29): модель на просьбу «от 10 до 15»
+    вернула обложку и повестку — два слайда, 168 токенов, — и колода вышла из
+    двух слайдов. Такой ответ уходит на повтор, как любой невалидный. Порог —
+    половина нижней границы: план из восьми слайдов при «от 10» — выбор
+    модели, из двух — обрыв.
+    """
+    floor = max(3, min_slides // 2) if min_slides else 0
+    if not floor:
+        return DeckPlan
+
+    class BoundedDeckPlan(DeckPlan):
+        @model_validator(mode="after")
+        def _long_enough(self) -> BoundedDeckPlan:
+            if len(self.slides) < floor:
+                raise ValueError(
+                    f"в плане {len(self.slides)} слайдов, а нужно не меньше {floor}: "
+                    "план оборван — верни его целиком"
+                )
+            return self
+
+    return BoundedDeckPlan
 
 
 def resolve_quotes(plan: DeckPlan, pack: ContentPack) -> DeckPlan:
