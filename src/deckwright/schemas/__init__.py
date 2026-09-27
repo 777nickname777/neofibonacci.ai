@@ -84,6 +84,7 @@ from deckwright.schemas.template_spec import (
     Repeater,
     Slot,
     SlotRole,
+    TableGrid,
     TemplateSpec,
     readable_text_color,
 )
@@ -151,6 +152,7 @@ __all__ = [
     "StageTiming",
     "TableContent",
     "TableData",
+    "TableGrid",
     "TemplateSpec",
     "TextContent",
     "TextStyle",

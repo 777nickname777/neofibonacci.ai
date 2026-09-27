@@ -310,6 +310,32 @@ def _inherited_titles(
     return found
 
 
+# Поля текстовой рамки по умолчанию в OOXML (`a:bodyPr`): 0.1″ слева и
+# справа, 0.05″ сверху и снизу.
+_DEFAULT_INSETS = {"lIns": 91_440, "rIns": 91_440, "tIns": 45_720, "bIns": 45_720}
+
+
+def _with_insets(element: etree._Element, box: Box) -> Box:
+    """Рамка вместе с полями, объявленными её `a:bodyPr`.
+
+    Без них фиттер считал поля умолчательными: шаблон, набравший заголовок
+    36 pt в рамку 0.6″ с нулевыми полями, выглядел для вёрстки рамкой, где не
+    помещается ни строки, и все его композиции отбрасывались.
+    """
+    body = element.xpath("./*[local-name()='txBody']/*[local-name()='bodyPr']")
+    if not body or not any(body[0].get(name) is not None for name in _DEFAULT_INSETS):
+        return box
+    value = {
+        name: int(body[0].get(name, default)) for name, default in _DEFAULT_INSETS.items()
+    }
+    return box.model_copy(
+        update={
+            "inset_x": value["lIns"] + value["rIns"],
+            "inset_y": value["tIns"] + value["bIns"],
+        }
+    )
+
+
 def _collect(container: etree._Element, slide_w: int, slide_h: int) -> list[_Shape]:
     shapes: list[_Shape] = []
     min_area = slide_w * slide_h * MIN_SLOT_AREA_SHARE
@@ -319,7 +345,7 @@ def _collect(container: etree._Element, slide_w: int, slide_h: int) -> list[_Sha
         shapes.append(
             _Shape(
                 element=element,
-                box=box,
+                box=_with_insets(element, box),
                 tag=etree.QName(element).localname,
                 text=_text_of(element),
                 size_pt=_max_size(element),
@@ -377,6 +403,29 @@ def _even_pitch(positions: list[int]) -> int | None:
     return round(average)
 
 
+def _without_stray(members: list[_Shape]) -> list[_Shape]:
+    """Ряд без одной случайно похожей фигуры.
+
+    Одинаковый стиль — ещё не один ряд: подпись к слайду набрана тем же
+    кеглем и цветом, что описания шагов под ней, и пять фигур уже не стояли
+    равномерно — ряд из четырёх описаний не опознавался. Если без одной фигуры
+    остальные (не меньше трёх) встают с равным шагом, лишняя — не член ряда.
+    """
+    def regular(group: list[_Shape]) -> bool:
+        return (
+            _even_pitch(sorted(s.box.x for s in group)) is not None
+            or _even_pitch(sorted(s.box.y for s in group)) is not None
+        )
+
+    if len(members) < 4 or regular(members):
+        return members
+    for stray in members:
+        rest = [shape for shape in members if shape is not stray]
+        if regular(rest):
+            return rest
+    return members
+
+
 def _find_repeaters(
     shapes: list[_Shape], slide_index: int, slide_w: int, slide_h: int
 ) -> tuple[list[Repeater], set[int]]:
@@ -406,6 +455,7 @@ def _find_repeaters(
             continue
         if any(id(shape.element) in consumed for shape in members):
             continue
+        members = _without_stray(members)
         horizontal = sorted(members, key=lambda s: s.box.x)
         vertical = sorted(members, key=lambda s: s.box.y)
 
@@ -701,6 +751,66 @@ def mine_slide(
         _COLOR_OF.reset(token)
 
 
+# Нижняя доля слайда, где стоит номер страницы.
+_PAGE_NUMBER_ZONE = 0.85
+_PAGE_DIGITS = re.compile(r"^\d{1,3}$")
+
+
+def _is_page_number(shape: _Shape, slide_index: int, slide_h: int) -> bool:
+    """Номер страницы, набранный текстом, а не полем: «02» внизу второго слайда.
+
+    Шаблон без плейсхолдеров пишет номер обычной надписью. Место под
+    содержание из него получалось («показатель», и туда садился пункт), а
+    номера в колоде не оставалось. Опознаётся по двум признакам сразу: число
+    равно номеру слайда-донора и стоит у нижнего края.
+    """
+    text = shape.text.strip()
+    return (
+        bool(_PAGE_DIGITS.match(text))
+        and int(text) == slide_index
+        and shape.box.y >= slide_h * _PAGE_NUMBER_ZONE
+    )
+
+
+# Насколько ниже заголовка может начинаться подзаголовок — в долях высоты
+# заголовка, и насколько его левый край может разойтись с заголовочным.
+_SUBTITLE_GAP_SHARE = 0.6
+_SUBTITLE_ALIGN_EMU = 137_160  # 0.15″
+_SUBTITLE_MIN_WIDTH_SHARE = 0.5
+
+
+def _subtitle_under_title(slots: list[Slot]) -> list[Slot]:
+    """Строка сразу под заголовком, по его левому краю и мельче — подзаголовок.
+
+    Ранг кегля этого не видит: на слайде со схемой второй по величине текст —
+    подписи узлов, и подзаголовок становился телом. Весь список пунктов
+    садился в эту строку первым, в порядке чтения.
+    """
+    title = next((slot for slot in slots if slot.role is SlotRole.TITLE), None)
+    if title is None or any(slot.role is SlotRole.SUBTITLE for slot in slots):
+        return slots
+    title_size = title.style.size_pt if title.style is not None else 0.0
+
+    def below(slot: Slot) -> bool:
+        size = slot.style.size_pt if slot.style is not None else 0.0
+        gap = slot.box.y - title.box.bottom
+        return (
+            slot.role in (SlotRole.BODY, SlotRole.KPI_LABEL, SlotRole.CAPTION)
+            and -_SUBTITLE_ALIGN_EMU <= gap <= title.box.h * _SUBTITLE_GAP_SHARE
+            and abs(slot.box.x - title.box.x) <= _SUBTITLE_ALIGN_EMU
+            and slot.box.w >= title.box.w * _SUBTITLE_MIN_WIDTH_SHARE
+            and (not title_size or size < title_size)
+        )
+
+    found = next((slot for slot in sorted(slots, key=lambda s: s.box.y) if below(slot)), None)
+    if found is None:
+        return slots
+    return [
+        slot.model_copy(update={"role": SlotRole.SUBTITLE}) if slot is found else slot
+        for slot in slots
+    ]
+
+
 def _inherited_color(role: SlotRole, inherited_slots: dict[SlotRole, Slot]) -> Color | None:
     """Цвет, который место этой роли наследует от макета."""
     for wanted in (role, SlotRole.BODY):
@@ -762,6 +872,8 @@ def _mine_slide(
         role = declared.get(id(shape.element))
         if role is not None and not shape.text:
             role = None  # пустой плейсхолдер — не место для содержания
+        if role is None and _is_page_number(shape, slide_index, slide_h):
+            role = SlotRole.SLIDE_NUMBER
         if role is None:
             role = _role_from_geometry(shape, shapes, slide_h, slide_w)
             # Заголовок на слайде один. Если автор объявил его сам, крупный
@@ -817,6 +929,7 @@ def _mine_slide(
 
     if not slots and not repeaters:
         return None
+    slots = _subtitle_under_title(slots)
 
     boxes = [slot.box for slot in slots] + [r.item_box for r in repeaters]
     # Область обрезается по слайду: дизайнеры выпускают фигуры за обрез, и

@@ -40,6 +40,9 @@ class SlotRole(StrEnum):
     LOGO = "logo"
     FOOTER = "footer"
     SLIDE_NUMBER = "slide_number"
+    # Порядковый номер элемента повторителя («01», «02» в узлах маршрута):
+    # содержание туда не кладётся, номер пишет рендер.
+    ORDINAL = "ordinal"
     DECOR = "decor"
     UNKNOWN = "unknown"
 
@@ -187,6 +190,24 @@ class LayoutSpec(BaseModel):
     is_dark: bool = False
 
 
+class TableGrid(BaseModel):
+    """Таблица, собранная из прямоугольников: шапка и строки-повторитель.
+
+    Шаблон-бланк рисует таблицу фигурами: ячейки шапки — залитые
+    прямоугольники с надписью, строки — одинаковые полосы с надписями в
+    колонках. Нативной таблицы там нет, и данные ложатся по этим местам.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    repeater_id: str
+    # Места шапки и ячеек строки — слева направо, колонка к колонке.
+    header_slot_ids: list[str] = Field(min_length=2)
+    cell_slot_ids: list[str] = Field(min_length=2)
+    # Шапка колонки номеров («№»): номера пишет рендер, подпись остаётся.
+    number_header_id: str | None = None
+
+
 class Pattern(BaseModel):
     """Композиция, снятая со слайда-примера. Основная единица вёрстки.
 
@@ -219,6 +240,8 @@ class Pattern(BaseModel):
     # половины слайда. Незаполненный элемент такой композиции не убрать —
     # она годится, только если заполнены все.
     baked_items: bool = False
+    # Таблица из прямоугольников, если композиция её несёт.
+    table_grid: TableGrid | None = None
     # Как определён класс: правилами по структуре или моделью по рендеру.
     provenance: Provenance
 

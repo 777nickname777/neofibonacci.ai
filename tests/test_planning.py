@@ -310,5 +310,8 @@ def test_figure_without_kind_is_cited():
     """plan_deck.v6: у процитированного числа модель `kind` не пишет."""
     figure = Figure.model_validate({"text": "26", "fact_ids": ["f3"]})
     assert figure.kind is FigureKind.CITED
+    # С формулой и без `kind` — выведенное: иначе план уходил на повтор.
+    derived = Figure.model_validate({"text": "в 3 раза", "fact_ids": ["f3"], "formula": "f3 / 3"})
+    assert derived.kind is FigureKind.DERIVED
     with pytest.raises(ValidationError, match="без формулы"):
         Figure.model_validate({"text": "в 3 раза", "kind": "derived", "fact_ids": ["f3"]})

@@ -22,7 +22,12 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.presentation import Presentation as PresentationObject
 
 from deckwright.parse import tokens as tokens_mod
-from deckwright.parse.bookends import bookend_pattern, find_bookends
+from deckwright.parse.bookends import (
+    bookend_pattern,
+    declares_titles,
+    find_bookends,
+    structural_bookends,
+)
 from deckwright.parse.fonts import extract_embedded_fonts
 from deckwright.parse.geometry import iter_shapes
 from deckwright.parse.patterns import (
@@ -38,11 +43,13 @@ from deckwright.schemas import (
     Box,
     Color,
     LayoutSpec,
+    Pattern,
     PatternClass,
     Provenance,
     Slot,
     SlotRole,
     SourceKind,
+    TableGrid,
     TemplateSpec,
     TextStyle,
     readable_text_color,
@@ -542,6 +549,7 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
         layout_use[key] = layout_use.get(key, 0) + 1
     patterns = []
     backdrops: dict[int, Color | None] = {}
+    titles_declared = declares_titles(list(prs.slides))
     for index, slide in enumerate(prs.slides, start=1):
         layout_id = layout_ids.get(id(slide.slide_layout._element))
         # Фон слайда может перекрывать фон layout'а собственной подложкой.
@@ -607,6 +615,8 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                     ],
                 }
             )
+            if not titles_declared:
+                pattern = _table_grid(_grown_frames(tree, pattern, slide_w, slide_h))
             patterns.append(classified(pattern, slide_w, slide_h))
         backdrops[index] = effective
 
@@ -648,6 +658,17 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                 bookend = bookend.model_copy(update={"repeaters": own + mined.repeaters})
             patterns.append(bookend)
             bookend_ids[kind] = bookend.id
+
+    if cover_index is None and closing_index is None and not declares_titles(slides):
+        cover, closing = structural_bookends(patterns)
+        for kind, found in ((PatternClass.TITLE, cover), (PatternClass.CLOSING, closing)):
+            if found is None:
+                continue
+            patterns = [
+                _as_bookend(pattern, kind, slide_h) if pattern is found else pattern
+                for pattern in patterns
+            ]
+            bookend_ids[kind] = found.id
 
     slide_count = len(prs.slides._sldIdLst)
     if slide_count and len(patterns) / slide_count < 0.5:
@@ -769,6 +790,276 @@ def _decor(tree, pattern, slide_w: int, slide_h: int) -> list[Box]:
             continue
         found.append(box)
     return found
+
+
+# Линия для записи: тонкая горизонталь под подписью («____» шаблона-бланка).
+_WRITING_LINE = 27_432  # 0.03″
+# Роли, чья рамка растёт вниз по свободному месту.
+_GROWING_ROLES = frozenset({SlotRole.BODY, SlotRole.CAPTION, SlotRole.KPI_LABEL})
+# Зазор между выросшей рамкой и тем, во что она упёрлась.
+_GROWTH_GAP = 45_720  # 0.05″
+# Ниже этой доли слайда — служебная зона: номер страницы, колонтитул.
+_GROWTH_FLOOR = 0.9
+
+
+def _is_writing_line(box: Box) -> bool:
+    return box.h <= _WRITING_LINE and box.w > 10 * max(1, box.h)
+
+
+# Доля рамки, перекрытая кругом, при которой надпись — метка узла.
+_LABEL_ON_NODE = 0.3
+
+
+def _shared_area(a: Box, b: Box) -> int:
+    width = min(a.right, b.right) - max(a.x, b.x)
+    height = min(a.bottom, b.bottom) - max(a.y, b.y)
+    return max(0, width) * max(0, height)
+
+
+def _same_rect(a: Box, b: Box) -> bool:
+    return (a.x, a.y, a.w, a.h) == (b.x, b.y, b.w, b.h)
+
+
+def _is_line_shape(element) -> bool:
+    """Соединитель или линия: габарит диагонали — не препятствие для текста."""
+    if etree.QName(element).localname == "cxnSp":
+        return True
+    geometry = element.find(f".//{{{A_NS}}}prstGeom")
+    preset = (geometry.get("prst") or "").lower() if geometry is not None else ""
+    return "line" in preset or "connector" in preset
+
+
+def _room_below(box: Box, shapes: list[tuple[Box, bool]], slide_h: int) -> int:
+    """Где кончается свободное место под рамкой: высота, до которой ей расти.
+
+    Останавливает любая фигура ниже рамки, пересекающая её по горизонтали,
+    кроме линий для записи: писать поверх них шаблон и задумал. Подложка,
+    внутри которой стоит рамка, останавливает своим низом.
+    """
+    limit = int(slide_h * _GROWTH_FLOOR)
+    for other, round_ in shapes:
+        if _same_rect(other, box) or _is_writing_line(other):
+            continue
+        across = min(other.right, box.right) - max(other.x, box.x)
+        if across <= 0:
+            continue
+        # Надпись на круге — метка узла («Проблема» в кружке схемы): круг её
+        # не растянет, а выросшая рамка забрала бы место описания под ним.
+        if round_ and _shared_area(box, other) >= box.area * _LABEL_ON_NODE:
+            return box.h
+        if _covers_most(box, other):
+            limit = min(limit, other.bottom)
+        elif other.y >= box.bottom - _GROWTH_GAP:
+            limit = min(limit, other.y)
+    return max(box.h, limit - box.y - _GROWTH_GAP)
+
+
+def _grown_frames(tree, pattern: Pattern, slide_w: int, slide_h: int) -> Pattern:
+    """Рамки текста шаблона-бланка — во всё свободное место под ними.
+
+    Шаблон без плейсхолдеров набирает каждую надпись в рамку ровно под
+    своё слово: «Что нужно изменить?» — 0.31″, под ней линия для записи.
+    Предложение туда не помещается ни на каком кегле, и вёрстка уходила на
+    обложку и финал — единственные высокие рамки. Место под текст в таком
+    шаблоне — это рамка вместе с пустым пространством и линиями под ней.
+    Рамка элемента повторителя растёт одинаково у всех элементов — на
+    наименьший из их запасов.
+    """
+    shapes = [
+        (box, element.find(f".//{{{A_NS}}}prstGeom[@prst='ellipse']") is not None)
+        for element, box, _ in iter_shapes(tree)
+        if box is not None
+        and box.area < 0.5 * slide_w * slide_h
+        and not _is_line_shape(element)
+    ]
+
+    def grow(slot: Slot, offsets: list[tuple[int, int]]) -> Slot:
+        if slot.role not in _GROWING_ROLES:
+            return slot
+        room = min(
+            _room_below(
+                slot.box.model_copy(update={"x": slot.box.x + dx, "y": slot.box.y + dy}),
+                shapes,
+                slide_h,
+            )
+            for dx, dy in offsets
+        )
+        if room <= slot.box.h:
+            return slot
+        return slot.model_copy(update={"box": slot.box.model_copy(update={"h": room})})
+
+    texts = {
+        (box.x, box.y, box.w, box.h): "".join(
+            node.text or "" for node in element.iter(f"{{{A_NS}}}t")
+        )
+        for element, box, _ in iter_shapes(tree)
+        if box is not None
+    }
+
+    def ordinal(slot: Slot, offsets: list[tuple[int, int]]) -> Slot:
+        """Номер элемента: у элементов донора там стоят 1, 2, 3… по порядку."""
+        found = [
+            texts.get((slot.box.x + dx, slot.box.y + dy, slot.box.w, slot.box.h), "").strip()
+            for dx, dy in offsets
+        ]
+        if len(found) < 2 or not all(text.isdigit() for text in found):
+            return slot
+        if [int(text) for text in found] != list(range(1, len(found) + 1)):
+            return slot
+        return slot.model_copy(update={"role": SlotRole.ORDINAL})
+
+    grown_slots = [grow(slot, [(0, 0)]) for slot in pattern.slots]
+    repeaters = []
+    for repeater in pattern.repeaters:
+        offsets = repeater.member_offsets or [(0, 0)]
+        items = [grow(ordinal(slot, offsets), offsets) for slot in repeater.item_slots]
+        # Рамка элемента растёт вместе с его текстом: иначе рендер не узнавал
+        # в выросшем тексте содержание элемента и убирал элемент целиком.
+        item_box = _union_all([repeater.item_box, *(slot.box for slot in items)])
+        frames = [
+            _union_all(
+                [
+                    frame,
+                    *(
+                        slot.box.model_copy(update={"x": slot.box.x + dx, "y": slot.box.y + dy})
+                        for slot in items
+                    ),
+                ]
+            )
+            for frame, (dx, dy) in zip(
+                repeater.member_frames, repeater.member_offsets, strict=False
+            )
+        ]
+        repeaters.append(
+            repeater.model_copy(
+                update={"item_slots": items, "item_box": item_box, "member_frames": frames}
+            )
+        )
+    grown = [slot.box for slot in grown_slots] + [
+        slot.box.model_copy(update={"x": slot.box.x + dx, "y": slot.box.y + dy})
+        for repeater in repeaters
+        for dx, dy in (repeater.member_offsets or [(0, 0)])
+        for slot in repeater.item_slots
+    ]
+    # Линии для записи под выросшей рамкой — не декор, который текст обходит:
+    # текст ляжет на их место, а рендер их уберёт.
+    decor = [
+        box
+        for box in pattern.decor
+        if not (_is_writing_line(box) and any(_covers_most(box, frame) for frame in grown))
+    ]
+    return pattern.model_copy(
+        update={"slots": grown_slots, "repeaters": repeaters, "decor": decor}
+    )
+
+
+def _as_bookend(pattern: Pattern, kind: PatternClass, slide_h: int) -> Pattern:
+    """Обложка или финал шаблона-бланка: надписи над заголовком — не места.
+
+    Как у обычной обложки (`bookend_pattern`): «РЕДАКТИРУЕМЫЙ ШАБЛОН» над
+    заголовком и плашка «НАЗВАНИЕ ПРОЕКТА» в углу — оформление шаблона.
+    Подзаголовок титула уходил в строку над заголовком и налезал на него.
+    Так же — надписи рядом с заголовком (плашка начинается на его высоте) и
+    в нижней служебной полосе («ДОРОЖНАЯ КАРТА ПРОЕКТА» у номера страницы).
+    """
+    title = next((slot for slot in pattern.slots if slot.role is SlotRole.TITLE), None)
+    if title is None:
+        return pattern.model_copy(update={"pattern_class": kind})
+    slots = [
+        slot.model_copy(update={"role": SlotRole.DECOR})
+        if slot is not title
+        and (slot.box.y < title.box.bottom or slot.box.y >= slide_h * _GROWTH_FLOOR)
+        else slot
+        for slot in pattern.slots
+    ]
+    return pattern.model_copy(update={"pattern_class": kind, "slots": slots})
+
+
+# Ячейки одной строки стоят на одной высоте с таким допуском.
+_ROW_TOLERANCE_EMU = 91_440  # 0.1″
+# Шапка — не дальше этого над первой строкой.
+_HEADER_REACH_EMU = 1_097_280  # 1.2″
+_CELL_ROLES = frozenset(
+    {SlotRole.BODY, SlotRole.CAPTION, SlotRole.KPI_LABEL, SlotRole.KPI_VALUE}
+)
+
+
+def _overlap_x(a: Box, b: Box) -> int:
+    return max(0, min(a.right, b.right) - max(a.x, b.x))
+
+
+def _table_grid(pattern: Pattern) -> Pattern:
+    """Таблица из прямоугольников: строки-повторитель и шапка над ними.
+
+    Бланк рисует таблицу фигурами — ячейки шапки залиты, строки одинаковые, в
+    строке надписи по колонкам. Нативной таблицы нет, и без этого разбора
+    шапка была пятью местами под текст: список ложился в ячейку «№» шириной
+    0.69″. Ячейка шапки — надпись над первой строкой, по горизонтали на
+    колонке ячейки строки.
+    """
+    for repeater in pattern.repeaters:
+        if repeater.axis != "vertical":
+            continue
+        texts = [slot for slot in repeater.item_slots if slot.role in _CELL_ROLES]
+        if len(texts) < 2:
+            continue
+        top = min(slot.box.y for slot in texts)
+        row = sorted(
+            (slot for slot in texts if slot.box.y - top <= _ROW_TOLERANCE_EMU),
+            key=lambda slot: slot.box.x,
+        )
+        if len(row) < 2:
+            continue
+        first = repeater.member_frames[0].y if repeater.member_frames else repeater.item_box.y
+        heads = [
+            slot
+            for slot in pattern.slots
+            if slot.role in _CELL_ROLES
+            and first - _HEADER_REACH_EMU <= slot.box.y
+            and slot.box.y + min(slot.box.h, _ROW_TOLERANCE_EMU * 5) <= first + _ROW_TOLERANCE_EMU
+        ]
+        mapped = []
+        for cell in row:
+            best = max(heads, key=lambda head: _overlap_x(head.box, cell.box), default=None)
+            if best is None or not _overlap_x(best.box, cell.box) or best in mapped:
+                break
+            mapped.append(best)
+        if len(mapped) != len(row):
+            continue
+        number = None
+        ordinals = [slot for slot in repeater.item_slots if slot.role is SlotRole.ORDINAL]
+        if ordinals:
+            number = max(
+                (head for head in heads if head not in mapped),
+                key=lambda head: _overlap_x(head.box, ordinals[0].box),
+                default=None,
+            )
+            if number is not None and not _overlap_x(number.box, ordinals[0].box):
+                number = None
+        # Шапка — больше не место под пункты: её заполняет только таблица.
+        header_ids = {slot.id for slot in mapped} | ({number.id} if number else set())
+        slots = [
+            slot.model_copy(update={"role": SlotRole.UNKNOWN}) if slot.id in header_ids else slot
+            for slot in pattern.slots
+        ]
+        return pattern.model_copy(
+            update={
+                "slots": slots,
+                "table_grid": TableGrid(
+                    repeater_id=repeater.id,
+                    header_slot_ids=[slot.id for slot in mapped],
+                    cell_slot_ids=[slot.id for slot in row],
+                    number_header_id=number.id if number else None,
+                ),
+            }
+        )
+    return pattern
+
+
+def _union_all(boxes: list[Box]) -> Box:
+    left, top = min(b.x for b in boxes), min(b.y for b in boxes)
+    right, bottom = max(b.right for b in boxes), max(b.bottom for b in boxes)
+    return Box(x=left, y=top, w=right - left, h=bottom - top)
 
 
 def _covers_most(inner: Box, outer: Box) -> bool:

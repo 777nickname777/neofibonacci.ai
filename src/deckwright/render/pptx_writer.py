@@ -374,6 +374,8 @@ def render_deck(
                 slide, donor, deck.slide_width_emu, deck.slide_height_emu
             )
 
+        # Какие фигуры соединяет каждая линия донора — до всякой уборки.
+        anchors = _line_anchors(slide)
         candidates = _text_shapes(slide)
         # Где у донора был текст — до того, как его заменят или сотрут.
         donor_text = [box for box, shape in candidates if shape.text_frame.text.strip()]
@@ -386,6 +388,11 @@ def render_deck(
             used = _render_element(slide, element, candidates, accent, slide_ir)
             if used is not None:
                 filled.append(used)
+        # Номер страницы и номера элементов — служебный текст: в «занятое
+        # нашим содержанием» они не входят. Иначе номер страницы в углу
+        # делал занятым четвёртый столбец, и пустой узел «04» оставался.
+        _number_page(candidates, patterns.get(slide_ir.pattern_id), slide_ir.index)
+        _number_members(candidates, patterns.get(slide_ir.pattern_id), filled, deck)
 
         # Рыбный текст донора, в который ничего не положили, обязан уйти:
         # иначе в колоде останется «Lorem ipsum» дизайнера, и аудит
@@ -394,20 +401,194 @@ def render_deck(
             leftover.text_frame.clear()
 
         _drop_unused_repeater_items(
-            slide, patterns.get(slide_ir.pattern_id), filled, deck
+            slide, patterns.get(slide_ir.pattern_id), filled, deck, connectors=anchors
         )
         _drop_unfilled_data_frames(slide, filled)
         _drop_donor_figures(slide, donor_numbers, filled)
         _drop_sibling_figures(slide, patterns.get(slide_ir.pattern_id), slide_ir)
-        _drop_emptied_panels(slide, donor_text, filled, deck)
+        _drop_emptied_panels(
+            slide,
+            donor_text,
+            filled,
+            deck,
+            kept=_used_member_bands(patterns.get(slide_ir.pattern_id), filled, deck),
+        )
         _drop_orphan_decor(slide, patterns.get(slide_ir.pattern_id), donor_text, filled)
 
         _drop_unfilled_placeholders(slide, filled)
+        _drop_writing_lines(slide, patterns.get(slide_ir.pattern_id))
+        _drop_dangling_lines(slide, anchors)
         if slide_ir.speaker_notes:
             slide.notes_slide.notes_text_frame.text = slide_ir.speaker_notes
 
     prs.save(str(output_path))
     return output_path
+
+
+# Линия для записи: тонкая горизонталь без текста («____» бланка).
+_WRITING_LINE_EMU = 27_432  # 0.03″
+# Насколько конец линии может не доходить до фигуры, чтобы считаться на ней.
+_ANCHOR_TOLERANCE_EMU = 91_440  # 0.1″
+
+
+def _is_line(element) -> bool:
+    if etree.QName(element).localname == "cxnSp":
+        return True
+    preset = element.xpath("./*[local-name()='spPr']/*[local-name()='prstGeom']/@prst")
+    return bool(preset) and ("line" in preset[0].lower() or "connector" in preset[0].lower())
+
+
+def _line_ends(element, box: Box) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Концы линии с учётом отражения: габарит — это ещё не направление."""
+    xfrm = element.xpath("./*[local-name()='spPr']/*[local-name()='xfrm']")
+    flip_h = bool(xfrm) and xfrm[0].get("flipH") == "1"
+    flip_v = bool(xfrm) and xfrm[0].get("flipV") == "1"
+    x0, x1 = (box.right, box.x) if flip_h else (box.x, box.right)
+    y0, y1 = (box.bottom, box.y) if flip_v else (box.y, box.bottom)
+    return (x0, y0), (x1, y1)
+
+
+def _on_shape(point: tuple[int, int], box: Box) -> bool:
+    x, y = point
+    return (
+        box.x - _ANCHOR_TOLERANCE_EMU <= x <= box.right + _ANCHOR_TOLERANCE_EMU
+        and box.y - _ANCHOR_TOLERANCE_EMU <= y <= box.bottom + _ANCHOR_TOLERANCE_EMU
+    )
+
+
+def _line_anchors(slide) -> dict[object, tuple[object, object]]:
+    """Для каждой линии донора — фигуры, на которых стоят оба её конца.
+
+    Линия, у которой оба конца на фигурах, — связь: маршрут между узлами,
+    луч от центра схемы к узлу. Линия без такой пары — оформление, и её
+    правило о повисших связях не касается.
+    """
+    shapes = [
+        (element, box)
+        for element, box, _ in iter_shapes(slide.shapes._spTree)
+        if box is not None and not _is_line(element)
+    ]
+    found: dict[object, tuple[object, object]] = {}
+    for element, box, _ in iter_shapes(slide.shapes._spTree):
+        if box is None or not _is_line(element):
+            continue
+        ends = _line_ends(element, box)
+        held = [
+            next((shape for shape, frame in shapes if _on_shape(end, frame)), None)
+            for end in ends
+        ]
+        if all(anchor is not None for anchor in held):
+            found[element] = (held[0], held[1])
+    return found
+
+
+def _drop_dangling_lines(slide, anchors: dict[object, tuple[object, object]]) -> int:
+    """Убирает связи, чей узел ушёл вместе с незаполненным элементом.
+
+    Маршрут из шести этапов при четырёх пунктах терял два узла, а отрезки к
+    ним оставались висеть; от центра схемы к пустому углу шёл луч в никуда.
+    """
+    removed = 0
+    for line, (first, second) in anchors.items():
+        if line.getparent() is None:
+            continue
+        if first.getparent() is None or second.getparent() is None:
+            line.getparent().remove(line)
+            removed += 1
+    return removed
+
+
+def _drop_writing_lines(slide, pattern) -> int:
+    """Убирает линии для записи из мест под текст.
+
+    Шаблон-бланк чертит под подписью линии, на которых пишут от руки. Наш
+    текст ложится на их место (рамка при разборе выросла на них), а под
+    незаполненным местом пустые линии бланка — та же заглушка шаблона.
+    """
+    if pattern is None:
+        return 0
+    frames = [slot.box for slot in pattern.slots] + [
+        slot.box.model_copy(update={"x": slot.box.x + dx, "y": slot.box.y + dy})
+        for repeater in pattern.repeaters
+        for dx, dy in (repeater.member_offsets or [(0, 0)])
+        for slot in repeater.item_slots
+    ]
+    removed = 0
+    for element, box, _ in list(iter_shapes(slide.shapes._spTree)):
+        if box is None or box.h > _WRITING_LINE_EMU or box.w <= 10 * box.h:
+            continue
+        if not _is_line(element) or element.getparent() is None:
+            continue
+        # Линия из декора — оформление (линия под цифрой `vk_tech`), её текст
+        # обходит. Линии для записи разбор из декора убрал сам.
+        if any(_same_box(box, item) for item in pattern.decor):
+            continue
+        if any(_share_inside(box, frame) >= _PANEL_USE_SHARE for frame in frames):
+            element.getparent().remove(element)
+            removed += 1
+    return removed
+
+
+def _write_number(shape, number: int, width: int) -> None:
+    runs = [run for paragraph in shape.text_frame.paragraphs for run in paragraph.runs]
+    if not runs:
+        return
+    runs[0].text = str(number).zfill(width)
+    for run in runs[1:]:
+        run.text = ""
+
+
+def _number_members(
+    candidates: list[tuple[Box, object]], pattern, filled: list[Box], deck: DeckIR
+) -> list[Box]:
+    """Номера элементов повторителя — по порядку занятых элементов.
+
+    «01» в узле маршрута — не текст-заглушка, а часть элемента: стирать его
+    значило оставить пустые кружки. Номер пишется в записи донора.
+    """
+    if pattern is None:
+        return []
+    placed: list[Box] = []
+    for repeater in pattern.repeaters:
+        ordinals = [slot for slot in repeater.item_slots if slot.role is SlotRole.ORDINAL]
+        if not ordinals:
+            continue
+        number = 0
+        for index in range(repeater.max_count):
+            band = _item_band(repeater, index, deck.slide_width_emu, deck.slide_height_emu)
+            if not any(_inside(box, band) for box in filled):
+                continue
+            number += 1
+            dx, dy = repeater.offset(index)
+            for slot in ordinals:
+                box = slot.box.model_copy(update={"x": slot.box.x + dx, "y": slot.box.y + dy})
+                shape = _take_matching_shape(candidates, box)
+                if shape is None:
+                    continue
+                _write_number(shape, number, len((slot.placeholder_text or "").strip()))
+                placed.append(box)
+    return placed
+
+
+def _number_page(candidates: list[tuple[Box, object]], pattern, index: int) -> list[Box]:
+    """Номер страницы донора — номером этого слайда, в той же записи.
+
+    Номер, набранный надписью, а не полем, сам не обновляется: без этого он
+    стирался вместе с текстом-заглушкой донора, и номера в колоде не было.
+    «02» остаётся двузначным: запись — часть оформления шаблона.
+    """
+    if pattern is None:
+        return []
+    placed: list[Box] = []
+    for slot in pattern.slots:
+        if slot.role is not SlotRole.SLIDE_NUMBER:
+            continue
+        shape = _take_matching_shape(candidates, slot.box)
+        if shape is None:
+            continue
+        _write_number(shape, index, len((slot.placeholder_text or "").strip()))
+        placed.append(slot.box)
+    return placed
 
 
 def _inside(inner: Box, outer: Box) -> bool:
@@ -534,7 +715,9 @@ def _item_band(repeater, index: int, slide_w: int, slide_h: int) -> Box:
     return Box(x=0, y=frame.y, w=slide_w, h=frame.h)
 
 
-def _drop_unused_repeater_items(slide, pattern, filled: list[Box], deck: DeckIR) -> int:
+def _drop_unused_repeater_items(
+    slide, pattern, filled: list[Box], deck: DeckIR, connectors=()
+) -> int:
     """Убирает элементы повторителя, которым не досталось содержания.
 
     Донор показывает четыре карточки, потому что дизайнеру было что сказать
@@ -550,6 +733,24 @@ def _drop_unused_repeater_items(slide, pattern, filled: list[Box], deck: DeckIR)
     if pattern is None:
         return 0
 
+    # Шапка слайда — заголовок, подзаголовок и то, что под ними стоит на
+    # каждом слайде (прогресс-бар шаблона-бланка). Полоса горизонтального
+    # повторителя идёт на всю высоту слайда и снимала сегменты прогресс-бара
+    # над незаполненными элементами.
+    heads = [
+        slot.box.bottom
+        for slot in pattern.slots
+        if slot.role in (SlotRole.TITLE, SlotRole.SUBTITLE)
+    ]
+    header_bottom = max(heads) + _HEADER_ZONE_EMU if heads else 0
+    # Полоса элемента идёт через весь слайд и задевает чужое: кнопка «готово»
+    # под тремя колонками проверки уносила узлы «02» и «03» соседних колонок,
+    # полоса крайней колонки — номер страницы. Занятые элементы других
+    # повторителей и номер страницы уборке не подлежат.
+    protected = [
+        slot.box for slot in pattern.slots if slot.role is SlotRole.SLIDE_NUMBER
+    ] + _used_member_frames(pattern, filled, deck)
+
     removed = 0
     for repeater in pattern.repeaters:
         for index in range(repeater.max_count):
@@ -561,12 +762,26 @@ def _drop_unused_repeater_items(slide, pattern, filled: list[Box], deck: DeckIR)
             for element, box, _ in list(iter_shapes(slide.shapes._spTree)):
                 if box is None or not _inside(box, band):
                     continue
+                if box.bottom <= header_bottom:
+                    continue
+                if any(_inside(box, frame) for frame in protected):
+                    continue
+                # Связь между узлами решает правило повисших связей, а линия
+                # вне рамки самого элемента — не его часть: отрезок маршрута
+                # между двумя занятыми узлами лежал в полосе кнопки под ними.
+                if element in connectors:
+                    continue
+                if _is_line(element) and not _inside(box, _member_frame(repeater, index)):
+                    continue
                 parent = element.getparent()
                 if parent is not None:
                     parent.remove(element)
                     removed += 1
     return removed
 
+
+# Шапка слайда тянется на столько ниже заголовка или подзаголовка.
+_HEADER_ZONE_EMU = 228_600  # 0.25″
 
 # Панель — залитая фигура заметного размера, но не фон всего слайда.
 _PANEL_MIN_SHARE = 0.01
@@ -585,7 +800,41 @@ def _has_fill(element) -> bool:
     )
 
 
-def _drop_emptied_panels(slide, donor_text: list[Box], filled: list[Box], deck: DeckIR) -> int:
+def _member_frame(repeater, index: int) -> Box:
+    if index < len(repeater.member_frames):
+        return repeater.member_frames[index]
+    dx, dy = repeater.offset(index)
+    item = repeater.item_box
+    return Box(x=item.x + dx, y=item.y + dy, w=item.w, h=item.h)
+
+
+def _used_member_frames(pattern, filled: list[Box], deck: DeckIR) -> list[Box]:
+    """Рамки самих занятых элементов — не полосы через весь слайд."""
+    frames = []
+    for repeater in pattern.repeaters:
+        for index in range(repeater.max_count):
+            band = _item_band(repeater, index, deck.slide_width_emu, deck.slide_height_emu)
+            if any(_inside(box, band) for box in filled):
+                frames.append(_member_frame(repeater, index))
+    return frames
+
+
+def _used_member_bands(pattern, filled: list[Box], deck: DeckIR) -> list[Box]:
+    """Полосы элементов повторителя, которым досталось наше содержание."""
+    if pattern is None:
+        return []
+    bands = []
+    for repeater in pattern.repeaters:
+        for index in range(repeater.max_count):
+            band = _item_band(repeater, index, deck.slide_width_emu, deck.slide_height_emu)
+            if any(_inside(box, band) for box in filled):
+                bands.append(band)
+    return bands
+
+
+def _drop_emptied_panels(
+    slide, donor_text: list[Box], filled: list[Box], deck: DeckIR, kept: list[Box] = ()
+) -> int:
     """Убирает панели донора, у которых не осталось содержания.
 
     Карточка, плашка, кнопка, серая панель под таблицей — у донора в них
@@ -613,6 +862,11 @@ def _drop_emptied_panels(slide, donor_text: list[Box], filled: list[Box], deck: 
         if not any(_inside(text, box) for text in donor_text):
             continue
         if any(_share_inside(taken, box) >= _PANEL_USE_SHARE for taken in filled):
+            continue
+        # Узел использованного элемента — часть элемента, а не подложка
+        # чужого текста: подпись в кружке схемы пуста, а текст элемента лёг
+        # под кружок. Без узла пропадала и связь к нему.
+        if any(_inside(box, band) for band in kept):
             continue
         for other, other_box, _ in list(iter_shapes(tree)):
             if other is element or other_box is None or not _inside(other_box, box):

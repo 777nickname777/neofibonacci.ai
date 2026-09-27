@@ -39,6 +39,23 @@ DEFAULT_LINE_HEIGHT = 1.2
 FRAME_INSET_X_EMU = 91_440
 FRAME_INSET_Y_EMU = 45_720
 
+# Высота последней строки в долях кегля: межстрочный интервал ей не нужен,
+# только сам шрифт (ascent + descent у Arial и Liberation Sans ≈ 1.15). Рамка,
+# которую шаблон набрал ровно в одну строку, иначе не вмещала ни одной.
+LAST_LINE_HEIGHT = 1.15
+
+
+def frame_inset_x(box) -> int:
+    """Поля рамки по горизонтали: объявленные ею или умолчания PowerPoint."""
+    inset = getattr(box, "inset_x", None)
+    return FRAME_INSET_X_EMU if inset is None else inset
+
+
+def frame_inset_y(box) -> int:
+    """Поля рамки по вертикали: объявленные ею или умолчания PowerPoint."""
+    inset = getattr(box, "inset_y", None)
+    return FRAME_INSET_Y_EMU if inset is None else inset
+
 # Ширина глифа, которого в шрифте нет, — половина кегля. Грубо, но лучше, чем
 # считать такой символ нулевым.
 FALLBACK_ADVANCE_RATIO = 0.5
@@ -125,9 +142,10 @@ def measure_height_emu(
     size_pt: float,
     width_emu: int,
     line_height: float = DEFAULT_LINE_HEIGHT,
+    inset_x_emu: int = FRAME_INSET_X_EMU,
 ) -> int:
     """Высота, которую текст займёт в боксе такой ширины."""
-    usable = max(1, width_emu - FRAME_INSET_X_EMU)
+    usable = max(1, width_emu - inset_x_emu)
     lines = wrap(text, metrics, size_pt, usable)
     return round(len(lines) * size_pt * line_height * EMU_PER_POINT)
 

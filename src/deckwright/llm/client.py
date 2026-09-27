@@ -62,6 +62,9 @@ class StepUsage:
     completion_tokens: int = 0
     answer_chars: int = 0
     slowest_seconds: float = 0.0
+    # Последняя ошибка проверки ответа: повтор стоит целого вызова, и без
+    # причины его не устранить.
+    last_error: str = ""
 
 
 _SCHEMA_INSTRUCTION = (
@@ -344,6 +347,9 @@ class LiveClient:
             except ValidationError as exc:
                 last_error = str(exc)
                 self.retries += 1
+                with self._step_lock:
+                    record = self.by_step.setdefault(step, StepUsage())
+                    record.last_error = " ".join(last_error.split())[:300]
                 messages = [
                     *messages,
                     {"role": "assistant", "content": raw},

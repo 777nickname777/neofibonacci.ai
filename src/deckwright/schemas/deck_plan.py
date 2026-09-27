@@ -74,6 +74,19 @@ class Figure(BaseModel):
     # Допустимы только идентификаторы, числа и четыре действия.
     formula: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _kind_from_formula(cls, data):
+        """Без `kind` число с формулой — выведенное, без формулы — цитата.
+
+        plan_deck.v6 разрешил не писать `kind`, и модель опускала его и у
+        выведенного числа: «cited с формулой» не проходило проверку, и план
+        запрашивался заново (живой прогон docx × vk_tech: 3 вызова вместо 1).
+        """
+        if isinstance(data, dict) and not data.get("kind"):
+            data = {**data, "kind": "derived" if data.get("formula") else "cited"}
+        return data
+
     @model_validator(mode="after")
     def _derived_shows_its_working(self) -> Figure:
         if self.kind is FigureKind.DERIVED and not self.formula:

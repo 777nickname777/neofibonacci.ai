@@ -37,6 +37,12 @@ class Box(Frozen):
     y: int
     w: int = Field(gt=0)
     h: int = Field(gt=0)
+    # Внутренние поля текстовой рамки, сумма по оси (слева + справа, сверху +
+    # снизу), если рамка их объявила. `None` — умолчания PowerPoint. Шаблон без
+    # плейсхолдеров набирает заголовок в рамку ровно в строку с нулевыми
+    # полями: с умолчаниями фиттер считал, что туда не влезает ни строки.
+    inset_x: int | None = Field(default=None, ge=0)
+    inset_y: int | None = Field(default=None, ge=0)
 
     @property
     def right(self) -> int:

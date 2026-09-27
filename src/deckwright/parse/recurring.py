@@ -152,6 +152,13 @@ def find_recurring(
             continue
         element, box = members[0]
         text = _text_of(element)
+        # Логотип и колонтитул повторяют не только место, но и текст. Рамка
+        # с разным текстом на каждом слайде — заголовок шаблона без
+        # плейсхолдеров («Проект проходит шесть этапов», «Цель задаёт…»), а
+        # не логотип. Номер страницы меняется законно.
+        texts = {_text_of(other) for other, _ in members}
+        if len(texts) > 1 and not _is_slide_number(element, text):
+            continue
         elements.append(
             RecurringElement(
                 id=f"recurring{index}",

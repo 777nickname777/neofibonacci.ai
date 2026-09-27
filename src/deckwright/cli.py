@@ -229,6 +229,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 f"[шаг] {role} {step}: вызовов {record.calls}, ответ "
                 f"{record.completion_tokens} ток. / {record.answer_chars} симв., "
                 f"самый долгий {record.slowest_seconds}с"
+                + (f"; повтор из-за: {record.last_error}" if record.last_error else "")
             )
 
     total = time.monotonic() - run_started
