@@ -34,7 +34,8 @@ from pptx.util import Emu, Pt
 
 from deckwright.parse.geometry import iter_shapes
 from deckwright.parse.patterns import is_figure_text
-from deckwright.render.clone import clone_shape, purge_slides
+from deckwright.parse.tokens import own_background
+from deckwright.render.clone import clone_background, clone_shape, purge_slides
 from deckwright.schemas import (
     Align,
     Box,
@@ -374,6 +375,11 @@ def render_deck(
                 slide, donor, deck.slide_width_emu, deck.slide_height_emu
             )
 
+        # Фото донора — место под картинку, а не содержание: в колоду оно не
+        # переносится (генерации картинок пока нет). Логотипы, значки и декор
+        # в `photo_slots` не входят и остаются.
+        _drop_donor_photos(slide, patterns.get(slide_ir.pattern_id))
+
         # Какие фигуры соединяет каждая линия донора — до всякой уборки.
         anchors = _line_anchors(slide)
         candidates = _text_shapes(slide)
@@ -391,29 +397,43 @@ def render_deck(
         # Номер страницы и номера элементов — служебный текст: в «занятое
         # нашим содержанием» они не входят. Иначе номер страницы в углу
         # делал занятым четвёртый столбец, и пустой узел «04» оставался.
-        _number_page(candidates, patterns.get(slide_ir.pattern_id), slide_ir.index)
-        _number_members(candidates, patterns.get(slide_ir.pattern_id), filled, deck)
+        pattern = patterns.get(slide_ir.pattern_id)
+        bookend = slide_ir.pattern_id in spec.bookend_ids
+        # Обложка и финал без подписей в ряду элементов: ряд остаётся целиком.
+        whole = bookend and not _used_member_bands(pattern, filled, deck)
+        _number_page(candidates, pattern, slide_ir.index)
+        _number_members(candidates, pattern, filled, deck, keep_all=whole)
 
         # Рыбный текст донора, в который ничего не положили, обязан уйти:
         # иначе в колоде останется «Lorem ipsum» дизайнера, и аудит
         # справедливо найдёт текст-заглушку.
         for _, leftover in candidates:
             leftover.text_frame.clear()
+        _drop_unfilled_subtitle(slide, patterns.get(slide_ir.pattern_id), candidates)
 
-        _drop_unused_repeater_items(
-            slide, patterns.get(slide_ir.pattern_id), filled, deck, connectors=anchors
-        )
+        # Обложка и финал — лицо шаблона: маршрут, рамка «Название проекта»,
+        # карточки итога — оформление, и оно остаётся, даже когда подписать
+        # его нечем. Маршрут, подписанный разделами колоды, укорачивается до
+        # их числа, как на рабочем слайде; не подписанный ничем — остаётся
+        # целиком, без подписей.
+        if not whole:
+            _drop_unused_repeater_items(slide, pattern, filled, deck, connectors=anchors)
         _drop_unfilled_data_frames(slide, filled)
         _drop_donor_figures(slide, donor_numbers, filled)
-        _drop_sibling_figures(slide, patterns.get(slide_ir.pattern_id), slide_ir)
+        _drop_sibling_figures(slide, pattern, slide_ir)
+        # Панели обложки и финала вне ряда элементов — рамка «Название
+        # проекта», плашка контактов — оформление: остаются и пустыми.
+        # Пустые карточки ряда уходят, как на рабочем слайде.
         _drop_emptied_panels(
             slide,
             donor_text,
             filled,
             deck,
-            kept=_used_member_bands(patterns.get(slide_ir.pattern_id), filled, deck),
+            kept=_used_member_bands(pattern, filled, deck),
+            only_within=_member_frames(pattern) if bookend else None,
         )
-        _drop_orphan_decor(slide, patterns.get(slide_ir.pattern_id), donor_text, filled)
+        if not bookend:
+            _drop_orphan_decor(slide, pattern, donor_text, filled)
 
         _drop_unfilled_placeholders(slide, filled)
         _drop_writing_lines(slide, patterns.get(slide_ir.pattern_id))
@@ -593,12 +613,19 @@ def _write_number(shape, number: int, width: int) -> None:
 
 
 def _number_members(
-    candidates: list[tuple[Box, object]], pattern, filled: list[Box], deck: DeckIR
+    candidates: list[tuple[Box, object]],
+    pattern,
+    filled: list[Box],
+    deck: DeckIR,
+    keep_all: bool = False,
 ) -> list[Box]:
     """Номера элементов повторителя — по порядку занятых элементов.
 
     «01» в узле маршрута — не текст-заглушка, а часть элемента: стирать его
     значило оставить пустые кружки. Номер пишется в записи донора.
+
+    `keep_all` — маршрут обложки без подписей: он остаётся целиком, и
+    нумеруется каждый его узел.
     """
     if pattern is None:
         return []
@@ -608,9 +635,9 @@ def _number_members(
         if not ordinals:
             continue
         number = 0
-        for index in range(repeater.max_count):
+        for index in range(repeater.observed_count if keep_all else repeater.max_count):
             band = _item_band(repeater, index, deck.slide_width_emu, deck.slide_height_emu)
-            if not any(_inside(box, band) for box in filled):
+            if not keep_all and not any(_inside(box, band) for box in filled):
                 continue
             number += 1
             dx, dy = repeater.offset(index)
@@ -846,6 +873,44 @@ _PANEL_USE_SHARE = 0.5
 _FILLS = ("solidFill", "gradFill", "pattFill", "blipFill")
 
 
+def _drop_donor_photos(slide, pattern) -> int:
+    """Убирает фото донора: картинки и фигуры с заливкой-картинкой на месте фото."""
+    if pattern is None or not pattern.photo_slots:
+        return 0
+    removed = 0
+    for element, box, _ in list(iter_shapes(slide.shapes._spTree)):
+        if box is None or not element.xpath(".//*[local-name()='blip']"):
+            continue
+        if etree.QName(element).localname == "grpSp":
+            continue
+        if any(_same_box(box, photo) for photo in pattern.photo_slots):
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+                removed += 1
+    return removed
+
+
+def _drop_unfilled_subtitle(slide, pattern, leftovers: list[tuple[Box, object]]) -> int:
+    """Рамка подзаголовка донора, которой нечего получить, уходит со слайда.
+
+    Пустая надпись на картинке не видна, но в редакторе это фигура
+    «slide-subtitle» без текста на каждом слайде: её либо заполняют, либо
+    убирают. Своя подложка у неё — оформление, такую фигуру не трогаем.
+    """
+    if pattern is None:
+        return 0
+    boxes = [slot.box for slot in pattern.slots if slot.role is SlotRole.SUBTITLE]
+    removed = 0
+    for box, shape in leftovers:
+        if shape.text_frame.text.strip() or _has_fill(shape._element):
+            continue
+        if any(_same_box(box, subtitle) for subtitle in boxes):
+            shape._element.getparent().remove(shape._element)
+            removed += 1
+    return removed
+
+
 def _has_fill(element) -> bool:
     return any(
         etree.QName(child).localname in _FILLS
@@ -886,8 +951,24 @@ def _used_member_bands(pattern, filled: list[Box], deck: DeckIR) -> list[Box]:
     return bands
 
 
+def _member_frames(pattern) -> list[Box]:
+    """Рамки всех элементов всех повторителей композиции."""
+    if pattern is None:
+        return []
+    return [
+        _member_frame(repeater, index)
+        for repeater in pattern.repeaters
+        for index in range(repeater.observed_count)
+    ]
+
+
 def _drop_emptied_panels(
-    slide, donor_text: list[Box], filled: list[Box], deck: DeckIR, kept: list[Box] = ()
+    slide,
+    donor_text: list[Box],
+    filled: list[Box],
+    deck: DeckIR,
+    kept: list[Box] = (),
+    only_within: list[Box] | None = None,
 ) -> int:
     """Убирает панели донора, у которых не осталось содержания.
 
@@ -921,6 +1002,10 @@ def _drop_emptied_panels(
         # чужого текста: подпись в кружке схемы пуста, а текст элемента лёг
         # под кружок. Без узла пропадала и связь к нему.
         if any(_inside(box, band) for band in kept):
+            continue
+        if only_within is not None and not any(
+            _share_inside(box, frame) >= _PANEL_USE_SHARE for frame in only_within
+        ):
             continue
         for other, other_box, _ in list(iter_shapes(tree)):
             if other is element or other_box is None or not _inside(other_box, box):
@@ -1045,7 +1130,7 @@ def _similar_size(a: Box, b: Box) -> bool:
     return abs(a.w - b.w) <= 0.15 * b.w and abs(a.h - b.h) <= 0.15 * b.h
 
 
-def _collect_donors(prs, deck: DeckIR) -> dict[int, tuple[object, list]]:
+def _collect_donors(prs, deck: DeckIR) -> dict[int, tuple[object, list, object]]:
     """Донорские слайды, нужные этой колоде: часть пакета и список фигур.
 
     Забираются до снятия слайдов. Хранится именно часть (`slide.part`), а не
@@ -1060,10 +1145,14 @@ def _collect_donors(prs, deck: DeckIR) -> dict[int, tuple[object, list]]:
     if not wanted:
         return {}
 
-    donors: dict[int, tuple[object, list]] = {}
+    donors: dict[int, tuple[object, list, object]] = {}
     for index, slide in enumerate(prs.slides, start=1):
         if index in wanted:
-            donors[index] = (slide.part, list(slide.shapes._spTree))
+            donors[index] = (
+                slide.part,
+                list(slide.shapes._spTree),
+                own_background(slide._element),
+            )
     return donors
 
 
@@ -1100,7 +1189,9 @@ def _off_canvas(element: etree._Element, width: int, height: int) -> bool:
     return x >= width or y >= height or x + cx <= 0 or y + cy <= 0
 
 
-def _clone_composition(slide, donor: tuple[object, list], width: int, height: int) -> None:
+def _clone_composition(
+    slide, donor: tuple[object, list, object], width: int, height: int
+) -> None:
     """Переносит фигуры донора на новый слайд вместе со связями.
 
     Клонируется всё, кроме служебных узлов дерева фигур и того, что лежит за
@@ -1108,7 +1199,9 @@ def _clone_composition(slide, donor: tuple[object, list], width: int, height: in
     которую выбрала вёрстка, — и её оформление приезжает целиком, а не
     пересказывается.
     """
-    donor_part, donor_shapes = donor
+    donor_part, donor_shapes, donor_bg = donor
+    if donor_bg is not None:
+        clone_background(donor_bg, donor_part, slide)
     # `add_slide` уже создал пустые плейсхолдеры макета. Если донор несёт
     # свой плейсхолдер того же типа и номера, пустой — дубль в той же рамке:
     # текст ложился в него шрифтом макета, а клон донора оставался с

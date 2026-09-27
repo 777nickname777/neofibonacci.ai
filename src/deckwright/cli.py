@@ -18,7 +18,7 @@ from deckwright.content.readers import UnsupportedInput
 from deckwright.environment import run_checks
 from deckwright.llm.base import StructuredClient
 from deckwright.llm.fake import RecordedClient
-from deckwright.pipeline import complete_variant, lay_out_variant, run_variant
+from deckwright.pipeline import complete_variant, lay_out_variant, run_variant, stage_times
 from deckwright.schemas import ContentPack, DeckPurpose, RunSummary
 
 DEFAULT_CONFIG = Path("configs/config.yaml")
@@ -245,11 +245,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         generation_seconds=round(total - parse_seconds, 3),
         total_seconds=round(total, 3),
         budget_seconds=cfg.run.time_budget_seconds,
+        stages=stage_times(pack_seconds, [result.manifest for result in results]),
     )
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "run-summary.json").write_text(
         summary.model_dump_json(indent=2), encoding="utf-8"
     )
+    print("[этапы] " + ", ".join(f"{name} {seconds}с" for name, seconds in summary.stages.items()))
     print(
         f"[прогон] разбор входа {summary.parse_seconds}с "
         f"(из них материалы {summary.ingest_seconds}с); "

@@ -84,13 +84,53 @@ def add_chart(slide, box: Box, content: ChartContent):
         data,
     )
     chart = frame.chart
-    chart.has_legend = content.has_legend and len(content.series) > 1
+    parts = content.chart_kind in (ChartKind.PIE, ChartKind.DOUGHNUT)
+    chart.has_legend = content.has_legend and (len(content.series) > 1 or parts)
     if chart.has_legend:
-        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.position = XL_LEGEND_POSITION.RIGHT if parts else XL_LEGEND_POSITION.BOTTOM
         chart.legend.include_in_layout = False
+        if content.label_style is not None:
+            chart.legend.font.size = Pt(content.label_style.size_pt)
 
     _paint(chart, content)
+    if content.title:
+        chart.has_title = True
+        frame_title = chart.chart_title.text_frame
+        frame_title.text = content.title
+        if content.label_style is not None:
+            for run in frame_title.paragraphs[0].runs:
+                run.font.size = Pt(content.label_style.size_pt)
+                run.font.bold = True
+                run.font.name = content.label_style.font_family
+                run.font.color.rgb = RGBColor.from_string(content.label_style.color.rgb)
+    elif not content.highlight:
+        chart.has_title = False
+    if parts:
+        _label_parts(chart, content)
     return frame
+
+
+def _label_parts(chart, content: ChartContent) -> None:
+    """Доли подписаны значением на секторе: без оси их не прочитать иначе."""
+    plot = chart.plots[0]
+    plot.has_data_labels = True
+    labels = plot.data_labels
+    labels.number_format = f'0.#" {content.unit}"' if content.unit else "0.#"
+    labels.number_format_is_linked = False
+    labels.show_value = True
+    if content.label_style is not None:
+        labels.font.size = Pt(content.label_style.size_pt)
+        labels.font.bold = True
+    # Подпись лежит на секторе: цвет — по заливке сектора, а не текста слайда.
+    colors = content.point_colors or [item.color for item in content.series]
+    dark = content.label_style.color if content.label_style is not None else Color(rgb="000000")
+    for index, point in enumerate(plot.series[0].points):
+        fill = colors[index % len(colors)]
+        ink = Color(rgb="FFFFFF") if fill.luminance < 0.4 else dark
+        point.data_label.font.color.rgb = RGBColor.from_string(ink.rgb)
+        if content.label_style is not None:
+            point.data_label.font.size = Pt(content.label_style.size_pt)
+            point.data_label.font.bold = True
 
 
 def _paint(chart, content: ChartContent) -> None:
@@ -111,8 +151,9 @@ def _paint(chart, content: ChartContent) -> None:
         return
     for index, plot_series in enumerate(chart.plots[0].series):
         if single_series:
+            colors = content.point_colors or [item.color for item in content.series]
             for point_index, point in enumerate(plot_series.points):
-                color = content.series[point_index % len(content.series)].color
+                color = colors[point_index % len(colors)]
                 point.format.fill.solid()
                 point.format.fill.fore_color.rgb = RGBColor.from_string(color.rgb)
             continue

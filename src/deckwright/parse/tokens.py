@@ -130,6 +130,41 @@ def resolve_color(
     return None
 
 
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def own_background(slide_element: etree._Element) -> etree._Element | None:
+    """Собственный фон слайда (`p:cSld/p:bg`) или `None`, если он наследуется.
+
+    Бланк задаёт фон на каждом слайде, а у мастера оставляет белый: такой
+    фон живёт только на слайде и при сборке по донору сам не приезжает.
+    """
+    csld = slide_element.find(f"{{{P_NS}}}cSld")
+    return csld.find(f"{{{P_NS}}}bg") if csld is not None else None
+
+
+def background_signature(bg: etree._Element | None, part) -> str | None:
+    """Отпечаток фона: разметка заливки, где ссылка на картинку заменена её
+    содержимым. У донора и у собранного слайда `rId` разные, а картинка одна.
+    """
+    if bg is None:
+        return None
+    import hashlib
+
+    node = etree.fromstring(etree.tostring(bg))
+    for child in node.iter():
+        for attr in ("embed", "link", "id"):
+            rid = child.get(f"{{{R_NS}}}{attr}")
+            if not rid:
+                continue
+            try:
+                blob = part.related_part(rid).blob
+            except (KeyError, AttributeError):
+                blob = rid.encode()
+            child.set(f"{{{R_NS}}}{attr}", hashlib.sha1(blob).hexdigest()[:12])
+    return hashlib.sha1(etree.tostring(node, method="c14n")).hexdigest()[:16]
+
+
 _LUMINANCE_MODS = ("lumMod", "lumOff", "shade", "tint")
 
 

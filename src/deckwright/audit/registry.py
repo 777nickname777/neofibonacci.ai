@@ -142,6 +142,12 @@ CHECKS: tuple[Check, ...] = (
         "Цвет текста не тот, которым шаблон пишет на этой заливке",
     ),
     _det(
+        "template.background_off_donor",
+        IssueCategory.TEMPLATE,
+        Severity.ERROR,
+        "Фон слайда не такой, как у слайда-донора шаблона",
+    ),
+    _det(
         "template.unknown_layout",
         IssueCategory.TEMPLATE,
         Severity.ERROR,
@@ -193,6 +199,12 @@ CHECKS: tuple[Check, ...] = (
         IssueCategory.INTEGRITY,
         Severity.ERROR,
         "На слайде остались данные донора: рыбный график или чужое число",
+    ),
+    _det(
+        "integrity.donor_photo_left",
+        IssueCategory.INTEGRITY,
+        Severity.ERROR,
+        "На слайде осталось фото шаблона: иллюстрация чужой темы",
     ),
     _det(
         "integrity.duplicate_slides",

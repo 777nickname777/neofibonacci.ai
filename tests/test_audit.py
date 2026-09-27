@@ -1148,3 +1148,65 @@ def test_table_header_is_written_as_the_template_writes_on_its_fill(
     element.table = element.table.model_copy(update={"header_style": black})
     found = text_on_fill(slide, result.spec)
     assert [issue.check_id for issue in found] == ["template.text_color_off_template"]
+
+
+def test_background_unlike_the_donor_is_a_finding(tmp_path):
+    """`"template.background_off_donor"`: фон задан на слайде шаблона, а в
+    колоде его нет — слайд белый на белом мастере."""
+    from pptx import Presentation as Open
+
+    from deckwright.audit.deterministic.content import donor_background
+    from deckwright.parse.tokens import own_background
+
+    template = Path("data/holdout/dorozhnaya_karta.pptx")
+    if not template.exists():
+        pytest.skip("нет бланка «Дорожная карта»")
+    source = Path(__file__).parent / "fixtures" / "roadmap_docx"
+    result = run_variant(
+        template_path=template,
+        pack=ContentPack.model_validate(json.loads((source / "pack.json").read_text("utf-8"))),
+        cfg=load_config(CONFIG),
+        client=RecordedClient(source / "recorded"),
+        variant="dense",
+        output_dir=tmp_path / "deck",
+    )
+    assert donor_background(result.pptx, result.deck, result.spec) == []
+
+    presentation = Open(str(result.pptx))
+    bg = own_background(presentation.slides[2]._element)
+    bg.getparent().remove(bg)
+    spoiled = tmp_path / "spoiled.pptx"
+    presentation.save(spoiled)
+    found = donor_background(spoiled, result.deck, result.spec)
+    assert [(i.check_id, i.slide_index) for i in found] == [
+        ("template.background_off_donor", 3)
+    ]
+
+
+def test_donor_photo_left_is_a_finding(clean, tmp_path):
+    """`"integrity.donor_photo_left"`: фото на слайде — всегда фото донора."""
+    import io
+    import random
+
+    from PIL import Image
+    from pptx import Presentation as Open
+    from pptx.util import Emu
+
+    from deckwright.audit.deterministic.content import donor_photos
+
+    assert donor_photos(clean.pptx, clean.deck) == []
+    rng = random.Random(7)
+    small = Image.new("RGB", (24, 16))
+    small.putdata([tuple(rng.randrange(40, 230) for _ in range(3)) for _ in range(24 * 16)])
+    photo = small.resize((600, 400), Image.BICUBIC)
+    blob = io.BytesIO()
+    photo.save(blob, "JPEG")
+    presentation = Open(str(clean.pptx))
+    inch = 914400
+    presentation.slides[1].shapes.add_picture(
+        io.BytesIO(blob.getvalue()), Emu(inch), Emu(inch), Emu(4 * inch), Emu(3 * inch)
+    )
+    spoiled = tmp_path / "photo.pptx"
+    presentation.save(spoiled)
+    found = donor_photos(spoiled, clean.deck)
+    assert [(i.check_id, i.slide_index) for i in found] == [("integrity.donor_photo_left", 2)]

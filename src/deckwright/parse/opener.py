@@ -37,6 +37,7 @@ from deckwright.parse.patterns import (
     text_align,
     text_valign,
 )
+from deckwright.parse.pictures import photo_boxes
 from deckwright.parse.recurring import find_recurring
 from deckwright.parse.semantics import classified
 from deckwright.schemas import (
@@ -549,6 +550,7 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
         layout_use[key] = layout_use.get(key, 0) + 1
     patterns = []
     backdrops: dict[int, Color | None] = {}
+    own_backgrounds: dict[int, tuple[Color | None, str | None]] = {}
     titles_declared = declares_titles(list(prs.slides))
     for index, slide in enumerate(prs.slides, start=1):
         layout_id = layout_ids.get(id(slide.slide_layout._element))
@@ -557,7 +559,15 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
             slide.shapes._spTree, slide_w, slide_h, theme, primary_map
         )
         inherited = by_layout_id.get(layout_id).background if layout_id in by_layout_id else None
-        effective = own_backdrop or inherited
+        # Собственный фон слайда (`p:bg`) перекрывает фон layout'а и мастера:
+        # бланк «Дорожная карта» красит так каждый слайд, а финал — в тёмный.
+        bg_node = tokens_mod.own_background(slide._element)
+        own_bg = (
+            tokens_mod.resolve_color(bg_node, theme, primary_map)
+            if bg_node is not None
+            else None
+        )
+        effective = own_backdrop or own_bg or inherited
         pattern = mine_slide(
             slide.shapes._spTree,
             index,
@@ -589,6 +599,11 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                         for slot in pattern.slots
                     ],
                     "figure_pictures": _figure_pictures(tree),
+                    "background": own_bg,
+                    "photo_slots": photo_boxes(tree, slide.part, slide_w, slide_h),
+                    "background_signature": tokens_mod.background_signature(
+                        bg_node, slide.part
+                    ),
                     "decor": _decor(tree, pattern, slide_w, slide_h),
                     "baked_items": bool(pattern.repeaters)
                     and _layout_draws_items(slide.slide_layout, layout_use, slide_w, slide_h),
@@ -619,6 +634,10 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                 pattern = _table_grid(_grown_frames(tree, pattern, slide_w, slide_h))
             patterns.append(classified(pattern, slide_w, slide_h))
         backdrops[index] = effective
+        own_backgrounds[index] = (
+            own_bg,
+            tokens_mod.background_signature(bg_node, slide.part),
+        )
 
     # ── Обложка и финал ──────────────────────────────────────────────────────
     slides = list(prs.slides)
@@ -656,6 +675,16 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                     if not any(_overlap(r.item_box, frame) for frame in covered)
                 ]
                 bookend = bookend.model_copy(update={"repeaters": own + mined.repeaters})
+            color, signature = own_backgrounds.get(number, (None, None))
+            bookend = bookend.model_copy(
+                update={
+                    "background": color,
+                    "background_signature": signature,
+                    "photo_slots": photo_boxes(
+                        slide.shapes._spTree, slide.part, slide_w, slide_h
+                    ),
+                }
+            )
             patterns.append(bookend)
             bookend_ids[kind] = bookend.id
 

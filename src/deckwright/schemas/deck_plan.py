@@ -152,6 +152,23 @@ class ContentBlock(BaseModel):
     image_prompt: str = ""
     table: TableData | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _text_is_an_item(cls, data):
+        """Текст блока в поле `text` — это его пункт.
+
+        Модель пишет абзац в `text`, а не в `items`: живой прогон «продажи ×
+        Дорожная карта» (сентябрь 2026) отбраковал из-за этого весь план, и
+        повтор стоил 43 с из бюджета. Поле переносится как есть — это ключ
+        JSON, а не разбор свободного текста.
+        """
+        if isinstance(data, dict) and isinstance(data.get("text"), str):
+            data = dict(data)
+            text = data.pop("text").strip()
+            if text and text not in data.get("items", []):
+                data["items"] = [*data.get("items", []), text]
+        return data
+
     @model_validator(mode="after")
     def _has_payload(self) -> ContentBlock:
         empty = (

@@ -28,11 +28,15 @@ from deckwright.config import Config
 from deckwright.content.ingest import IngestInput, ingest
 from deckwright.llm.base import StructuredClient
 from deckwright.pipeline import (
+    STAGE_INGEST,
+    STAGE_PLAN,
+    STAGE_TEMPLATE,
     LaidOut,
     PipelineResult,
     apply_selection,
     complete_variant,
     lay_out_variant,
+    stage_times,
 )
 from deckwright.schemas import ContentPack, DeckPurpose, FixKind
 
@@ -67,10 +71,33 @@ class RunState:
     pack: ContentPack | None = None
     ingest_seconds: float = 0.0
     ingest_warnings: list[str] = field(default_factory=list)
+    # Манифесты разложенных вариантов: в них разбор шаблона и план — видны,
+    # пока идут сборка и аудит.
+    laid_manifests: list = field(default_factory=list)
 
     @property
     def elapsed(self) -> float:
         return round(time.monotonic() - self.started_monotonic, 1)
+
+    def stages(self) -> dict[str, float]:
+        """Время по этапам: что уже закончилось, по часам (`pipeline.stage_times`).
+
+        Пока варианты собираются, известны разбор входа, шаблона и план; к
+        концу прогона — все пять этапов. На сайте живой прогон шёл 418.9 с при
+        бюджете 300, и по одному общему числу нельзя было сказать, где.
+        """
+        manifests = [
+            state.result.manifest for state in self.variants.values() if state.result is not None
+        ]
+        if manifests and len(manifests) == len(self.variants):
+            return stage_times(self.ingest_seconds, manifests)
+        known = {STAGE_INGEST: self.ingest_seconds} if self.pack is not None else {}
+        if self.laid_manifests:
+            laid = stage_times(self.ingest_seconds, self.laid_manifests)
+            known = {
+                name: laid[name] for name in (STAGE_TEMPLATE, STAGE_INGEST, STAGE_PLAN)
+            }
+        return known
 
     @property
     def done_count(self) -> int:
@@ -159,6 +186,7 @@ def start(
                 )
                 prepared = laid.prepared
                 laid_out.append((variant_state, laid))
+                state.laid_manifests.append(laid.manifest)
 
             def complete(item: tuple[VariantState, LaidOut]) -> None:
                 variant_state, laid = item

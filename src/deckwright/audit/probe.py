@@ -84,6 +84,7 @@ def _ask_slide(
 ) -> SlideMeasurement:
     planned = next((s for s in plan.slides if s.index == slide.index), None)
     text = prompt.template.format(
+        topic=plan.title,
         title=planned.takeaway_title if planned else "",
         intent=planned.intent.value if planned else "",
         body=_slide_body(slide),
@@ -147,7 +148,7 @@ def run(
     prompts_dir: str | Path | None = None,
 ) -> ProbeResult:
     """Прогоняет картиночный аудит и возвращает замеры."""
-    prompt = load_prompt("audit_slide.v2", prompts_dir)
+    prompt = load_prompt("audit_slide.v3", prompts_dir)
     questions = _questions(check_ids)
     result = ProbeResult()
 

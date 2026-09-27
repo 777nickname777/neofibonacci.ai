@@ -219,6 +219,12 @@ class Strategy:
         """
         if block.kind is not BlockKind.SERIES:
             return _BLOCK_ROLE[block.kind]
+        # Один ряд — динамика по месяцам, доли каналов — рисуется графиком в
+        # любом варианте: плотный сводил их в таблицы, и в колоде о продажах
+        # не было ни одной диаграммы. Таблицей плотный показывает сравнение
+        # нескольких рядов.
+        if self.data_viz_mode == "table" and len(block.series_ids) <= 1:
+            return SlotRole.CHART
         if self.data_viz_mode in _SERIES_ROLE:
             return _SERIES_ROLE[self.data_viz_mode]
         # auto: один ряд рисуется графиком, несколько сравниваются таблицей.

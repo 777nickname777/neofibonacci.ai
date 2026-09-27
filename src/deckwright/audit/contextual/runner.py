@@ -190,7 +190,7 @@ def _image_pass(
     only_slides: set[int] | None,
     shared: SharedAudit | None = None,
 ) -> tuple[list[Issue], list[str]]:
-    prompt = load_prompt("audit_slide.v2", prompts_dir)
+    prompt = load_prompt("audit_slide.v3", prompts_dir)
     questions = _questions(check_ids)
     # Титул и разделитель по замыслу состоят из заголовка: вопрос «есть ли
     # на слайде содержание» для них ложный. Живой прогон 4×4: модель
@@ -204,6 +204,7 @@ def _image_pass(
             return [], f"слайд {slide.index}: картинки нет, вопрос не задан"
         planned = by_index.get(slide.index)
         text = prompt.template.format(
+            topic=plan.title,
             title=planned.takeaway_title if planned else "",
             intent=planned.intent.value if planned else "",
             body=_slide_body(slide),

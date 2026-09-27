@@ -366,6 +366,70 @@ def undeclared_numbers(plan: DeckPlan, pack) -> list[Issue]:
     return found
 
 
+def donor_photos(pptx_path: str | Path, deck: DeckIR) -> list[Issue]:
+    """Фото на собранном слайде — всегда фото донора.
+
+    Колода фото не создаёт (генерации картинок нет), поэтому любое фото в
+    ней приехало клонированием композиции: студент за компьютером на слайде
+    о продажах кофеен. Контекстный вопрос «картинки по теме» этого не поймал
+    — модель видела уместную по виду иллюстрацию, темы колоды не знала и по
+    правилу «сомнение — это да» отвечала «да». Здесь — детерминированно, по
+    самому изображению (`parse.pictures`), а не по имени фигуры.
+    """
+    from pptx import Presentation
+
+    from deckwright.parse.pictures import photo_boxes
+
+    found: list[Issue] = []
+    presentation = Presentation(str(pptx_path))
+    width, height = presentation.slide_width, presentation.slide_height
+    for slide_ir, slide in zip(deck.slides, presentation.slides, strict=False):
+        photos = photo_boxes(slide.shapes._spTree, slide.part, width, height)
+        if photos:
+            found.append(
+                _issue(
+                    "integrity.donor_photo_left",
+                    slide_ir.index,
+                    f"фото шаблона на слайде ({len(photos)}): иллюстрация чужой темы — "
+                    "место под картинку, а не содержание",
+                    bbox=photos[0],
+                )
+            )
+    return found
+
+
+def donor_background(pptx_path: str | Path, deck: DeckIR, spec=None) -> list[Issue]:
+    """Фон собранного слайда против фона его донора.
+
+    Фон, заданный на слайде шаблона (`p:bg`), а не в мастере, не лежит в
+    дереве фигур и при клонировании композиции сам не приезжает: бланк
+    «Дорожная карта» собирался белым вместо своей заливки, тёмный финал —
+    белым. Сверяется отпечаток разметки фона: заливка, градиент, картинка.
+    """
+    from pptx import Presentation
+
+    from deckwright.parse.tokens import background_signature, own_background
+
+    patterns = {pattern.id: pattern for pattern in getattr(spec, "patterns", [])}
+    found: list[Issue] = []
+    presentation = Presentation(str(pptx_path))
+    for slide_ir, slide in zip(deck.slides, presentation.slides, strict=False):
+        pattern = patterns.get(slide_ir.pattern_id)
+        if pattern is None or pattern.background_signature is None:
+            continue
+        ours = background_signature(own_background(slide._element), slide.part)
+        if ours != pattern.background_signature:
+            found.append(
+                _issue(
+                    "template.background_off_donor",
+                    slide_ir.index,
+                    f"фон не как у донора (слайд {pattern.donor_slide_index} шаблона): "
+                    + ("своего фона нет, виден фон мастера" if ours is None else "другая заливка"),
+                )
+            )
+    return found
+
+
 def run(
     deck: DeckIR,
     plan: DeckPlan,
@@ -386,4 +450,6 @@ def run(
         found.extend(fill_ratio(pptx_path, deck, min_fill))
         found.extend(package(pptx_path))
         found.extend(donor_data(pptx_path, deck, spec))
+        found.extend(donor_background(pptx_path, deck, spec))
+        found.extend(donor_photos(pptx_path, deck))
     return found

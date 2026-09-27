@@ -115,7 +115,38 @@ def clone_shape(
     `verify_clone` убеждается, что каждая ссылка ведёт туда же, куда у донора.
     """
     element = copy.deepcopy(donor_element)
-    target_part = slide.part
+    moved = _relink(element, donor_part, slide.part)
+
+    # Уникальные идентификаторы фигур внутри принимающего слайда.
+    next_id = _next_shape_id(slide)
+    for cnv_pr in element.xpath(".//*[local-name()='cNvPr']"):
+        cnv_pr.set(_CNVPR_ID, str(next_id))
+        next_id += 1
+
+    slide.shapes._spTree.append(element)
+    return element, moved
+
+
+def clone_background(donor_bg: etree._Element, donor_part: XmlPart, slide: Slide) -> etree._Element:
+    """Переносит собственный фон донора (`p:bg`) на слайд вместе со связями.
+
+    Фон, заданный на слайде, а не в мастере, композицией не приезжает: он
+    лежит не в дереве фигур. Без него бланк «Дорожная карта» собирался на
+    белом мастере вместо своей заливки F7F9F8, а тёмный финал — на белом.
+    """
+    element = copy.deepcopy(donor_bg)
+    _relink(element, donor_part, slide.part)
+    csld = slide._element.find(f"{{{P_NS}}}cSld")
+    old = csld.find(f"{{{P_NS}}}bg")
+    if old is not None:
+        csld.remove(old)
+    # `p:bg` — первый ребёнок `p:cSld`, до дерева фигур.
+    csld.insert(0, element)
+    return element
+
+
+def _relink(element: etree._Element, donor_part: XmlPart, target_part) -> list[ClonedRef]:
+    """Перенумеровывает ссылки перенесённого узла на связи принимающей части."""
     moved: list[ClonedRef] = []
     # Кэш на время одной фигуры: одна и та же картинка в группе не должна
     # порождать несколько связей на одну часть.
@@ -139,15 +170,7 @@ def clone_shape(
                     )
                 )
             node.set(attr, remapped[donor_rid])
-
-    # Уникальные идентификаторы фигур внутри принимающего слайда.
-    next_id = _next_shape_id(slide)
-    for cnv_pr in element.xpath(".//*[local-name()='cNvPr']"):
-        cnv_pr.set(_CNVPR_ID, str(next_id))
-        next_id += 1
-
-    slide.shapes._spTree.append(element)
-    return element, moved
+    return moved
 
 
 def verify_clone(
