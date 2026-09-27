@@ -252,9 +252,10 @@ jobs:
             exit 1
           fi
           python tests/fixtures/make_inputs.py probe-inputs
-          for INPUT in brief docx pdf json; do
+          for INPUT in brief docx pdf json sales; do
             for TEMPLATE in data/templates/vk_tech.pptx data/templates/vk_workspace.pptx \
-                            data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx; do
+                            data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx \
+                            data/holdout/dorozhnaya_karta.pptx; do
               NAME=$(basename "$TEMPLATE" .pptx)
               if [ "$ONLY" != "true" ] && [[ ",$ONLY," != *",$INPUT:$NAME,"* ]]; then
                 continue
