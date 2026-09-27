@@ -15,3 +15,6 @@ venv/
 outputs/*
 !outputs/.gitkeep
 !outputs/demo/
+
+# Рабочие каталоги скриптов проверки живого прогона (scripts/probe_*.py|sh).
+out/
