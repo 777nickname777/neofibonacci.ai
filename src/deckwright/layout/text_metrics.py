@@ -26,6 +26,7 @@ from pathlib import Path
 from fontTools.ttLib import TTFont
 
 from deckwright.schemas import EMU_PER_POINT
+from deckwright.schemas.common import FRAME_INSET_X_EMU, FRAME_INSET_Y_EMU
 
 # Запас на кернинг и шейпинг, которых упрощённое измерение не видит.
 MEASUREMENT_SLACK = 1.03
@@ -33,11 +34,9 @@ MEASUREMENT_SLACK = 1.03
 # Доля кегля, уходящая на межстрочный интервал по умолчанию.
 DEFAULT_LINE_HEIGHT = 1.2
 
-# Внутренние поля текстового фрейма PowerPoint по умолчанию: 0.1 дюйма слева и
-# справа, 0.05 сверху и снизу. Не учитывать их — значит систематически считать,
-# что в бокс влезает больше, чем влезает.
-FRAME_INSET_X_EMU = 91_440
-FRAME_INSET_Y_EMU = 45_720
+# Внутренние поля текстового фрейма (`FRAME_INSET_*_EMU`) живут в
+# `schemas.common`: рамке их объявляет разбор шаблона, мерит по ним фиттер. Не
+# учитывать их — значит систематически считать, что в бокс влезает больше.
 
 # Высота последней строки в долях кегля: межстрочный интервал ей не нужен,
 # только сам шрифт (ascent + descent у Arial и Liberation Sans ≈ 1.15). Рамка,

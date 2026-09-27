@@ -418,6 +418,7 @@ def render_deck(
         _drop_unfilled_placeholders(slide, filled)
         _drop_writing_lines(slide, patterns.get(slide_ir.pattern_id))
         _drop_dangling_lines(slide, anchors)
+        _drop_orphan_links(slide, patterns.get(slide_ir.pattern_id), filled, deck, anchors)
         if slide_ir.speaker_notes:
             slide.notes_slide.notes_text_frame.text = slide_ir.speaker_notes
 
@@ -495,6 +496,59 @@ def _drop_dangling_lines(slide, anchors: dict[object, tuple[object, object]]) ->
         if first.getparent() is None or second.getparent() is None:
             line.getparent().remove(line)
             removed += 1
+    return removed
+
+
+def _drop_orphan_links(slide, pattern, filled: list[Box], deck: DeckIR, anchors) -> int:
+    """Убирает отрезки маршрута между элементами, один из которых ушёл.
+
+    Не все отрезки стоят концами на узлах: на бланке «Проверка» линия между
+    колонками висит в зазоре под кружками и ни одного из них не касается.
+    Правило повисших связей её не видит, и при одной колонке из трёх два
+    отрезка вели в пустоту. Связью здесь считается линия вдоль оси
+    повторителя, которая лежит в полосе элементов поперёк оси и своей
+    серединой приходится между центрами двух соседних элементов.
+    """
+    if pattern is None:
+        return 0
+    removed = 0
+    for repeater in pattern.repeaters:
+        if repeater.axis not in ("horizontal", "vertical") or repeater.max_count < 2:
+            continue
+        across = repeater.axis == "vertical"
+        frames = [_member_frame(repeater, index) for index in range(repeater.max_count)]
+        size = (deck.slide_width_emu, deck.slide_height_emu)
+        used = [
+            any(_inside(box, _item_band(repeater, index, *size)) for box in filled)
+            for index in range(repeater.max_count)
+        ]
+        if all(used):
+            continue
+        low = min(frame.x if across else frame.y for frame in frames)
+        high = max(frame.right if across else frame.bottom for frame in frames)
+        centers = [
+            (frame.y + frame.h / 2) if across else (frame.x + frame.w / 2) for frame in frames
+        ]
+        for element, box, _ in list(iter_shapes(slide.shapes._spTree)):
+            if box is None or element in anchors or not _is_line(element):
+                continue
+            along, thick = (box.h, box.w) if across else (box.w, box.h)
+            if thick > _WRITING_LINE_EMU or along == 0:
+                continue
+            start, end = (box.x, box.right) if across else (box.y, box.bottom)
+            if start < low or end > high:
+                continue
+            # Линия внутри одного элемента — его часть, а не связь.
+            if any(_inside(box, frame) for frame in frames):
+                continue
+            middle = (box.y + box.h / 2) if across else (box.x + box.w / 2)
+            for index in range(len(centers) - 1):
+                if not centers[index] < middle < centers[index + 1]:
+                    continue
+                if not (used[index] and used[index + 1]) and element.getparent() is not None:
+                    element.getparent().remove(element)
+                    removed += 1
+                break
     return removed
 
 

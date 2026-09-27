@@ -136,6 +136,12 @@ CHECKS: tuple[Check, ...] = (
         "Контраст ниже порога у пары «цвет по подложке», которой пишет сам шаблон",
     ),
     _det(
+        "template.text_color_off_template",
+        IssueCategory.TEMPLATE,
+        Severity.WARNING,
+        "Цвет текста не тот, которым шаблон пишет на этой заливке",
+    ),
+    _det(
         "template.unknown_layout",
         IssueCategory.TEMPLATE,
         Severity.ERROR,

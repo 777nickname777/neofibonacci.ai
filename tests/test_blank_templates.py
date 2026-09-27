@@ -221,3 +221,31 @@ def test_progress_bar_stays_on_every_roadmap_slide(roadmap, pack, tmp_path):
             continue
         found = sum(1 for shape in slide.shapes if shape.top == top and shape.height < 91_440)
         assert found == segments, (index, found)
+
+
+@pytest.mark.parametrize("variant", ["dense", "balanced", "airy"])
+def test_route_has_no_segments_to_removed_nodes(roadmap, tmp_path, variant):
+    """Отрезок маршрута — только между двумя оставшимися узлами.
+
+    На «Проверке» отрезки висят в зазоре под кружками и узлов не касаются;
+    при одной колонке из трёх они вели в пустоту. Узел — надпись-номер, ещё
+    одна такая надпись — номер страницы. План — записанный живой план по
+    docx-отчёту: в нём есть слайды с одним пунктом.
+    """
+    source = FIXTURES / "roadmap_docx"
+    result = run_variant(
+        template_path=ROADMAP,
+        pack=ContentPack.model_validate(json.loads((source / "pack.json").read_text("utf-8"))),
+        cfg=load_config(CONFIG),
+        client=RecordedClient(source / "recorded"),
+        variant=variant,
+        output_dir=tmp_path / variant,
+    )
+    for index, slide in enumerate(Presentation(str(result.pptx)).slides, start=1):
+        routes = sum(1 for shape in slide.shapes if "-route-" in shape.name)
+        numbers = sum(
+            1
+            for shape in slide.shapes
+            if shape.has_text_frame and shape.text_frame.text.strip().isdigit()
+        )
+        assert routes <= max(0, numbers - 2), (index, routes, numbers)

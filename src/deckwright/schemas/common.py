@@ -25,6 +25,12 @@ class Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+# Внутренние поля текстовой рамки, которые фиттер допускает, когда рамка их
+# не объявила: 0.1″ по горизонтали и 0.05″ по вертикали на обе стороны.
+FRAME_INSET_X_EMU = 91_440
+FRAME_INSET_Y_EMU = 45_720
+
+
 class Box(Frozen):
     """Прямоугольник в EMU от левого верхнего угла слайда.
 

@@ -45,6 +45,7 @@ from deckwright.schemas import (
     TextStyle,
     VAlign,
 )
+from deckwright.schemas.common import FRAME_INSET_X_EMU, FRAME_INSET_Y_EMU
 
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
@@ -328,10 +329,19 @@ def _with_insets(element: etree._Element, box: Box) -> Box:
     value = {
         name: int(body[0].get(name, default)) for name, default in _DEFAULT_INSETS.items()
     }
+    # Поля берутся, только если они уже, чем привычное фиттеру допущение: так
+    # рамка с нулевыми полями вмещает свою строку, а рамки с полями по
+    # умолчанию меряются как прежде. Иначе вёрстка `vk_workspace` поменялась
+    # бы без причины: её рамки объявляют полные поля OOXML, вдвое шире
+    # допущения фиттера, и заголовки, влезавшие раньше, перестали влезать.
+    inset_x = value["lIns"] + value["rIns"]
+    inset_y = value["tIns"] + value["bIns"]
+    if inset_x >= FRAME_INSET_X_EMU and inset_y >= FRAME_INSET_Y_EMU:
+        return box
     return box.model_copy(
         update={
-            "inset_x": value["lIns"] + value["rIns"],
-            "inset_y": value["tIns"] + value["bIns"],
+            "inset_x": min(inset_x, FRAME_INSET_X_EMU),
+            "inset_y": min(inset_y, FRAME_INSET_Y_EMU),
         }
     )
 

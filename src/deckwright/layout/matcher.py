@@ -1708,50 +1708,9 @@ def _header_text(fill: Color, spec: TemplateSpec | None = None, size_pt: float =
     return readable_text_color_on(fill)
 
 
-# Места без текста: их «цвет текста» — умолчание, а не решение шаблона.
-_NOT_WRITTEN = frozenset(
-    {
-        SlotRole.IMAGE,
-        SlotRole.ICON,
-        SlotRole.CHART,
-        SlotRole.TABLE,
-        SlotRole.DECOR,
-        SlotRole.LOGO,
-        SlotRole.UNKNOWN,
-    }
-)
-
-
-def written_on(fill: Color, spec: TemplateSpec) -> list[Color]:
-    """Цвета текста шаблона на подложке цвета `fill`, от частого к редкому."""
-    return _written_on(fill, spec)
-
-
 def _written_on(fill: Color, spec: TemplateSpec) -> list[Color]:
     """Цвета текста шаблона на подложке цвета `fill`, от частого к редкому."""
-    seen: dict[str, tuple[int, Color]] = {}
-
-    def count(backdrop: Color | None, color: Color | None) -> None:
-        if backdrop is None or color is None or backdrop.rgb != fill.rgb:
-            return
-        number, _ = seen.get(color.rgb, (0, color))
-        seen[color.rgb] = (number + 1, color)
-
-    for pattern in spec.patterns:
-        for slot in pattern.slots:
-            # Только места, где шаблон и правда пишет: у картинки на синей
-            # плашке `vk_workspace` цвет «текста» — умолчание стиля, и он
-            # выдавался за то, как шаблон пишет на синем (чёрным).
-            if slot.role in _NOT_WRITTEN or not (slot.placeholder_text or "").strip():
-                continue
-            count(slot.backdrop, slot.text_color or (slot.style.color if slot.style else None))
-        for repeater in pattern.repeaters:
-            for backdrop in repeater.member_backdrops:
-                for slot in repeater.item_slots:
-                    if slot.role in _NOT_WRITTEN or not (slot.placeholder_text or "").strip():
-                        continue
-                    count(backdrop, slot.text_color)
-    return [color for _, color in sorted(seen.values(), key=lambda item: -item[0])]
+    return spec.colors_written_on(fill)
 
 
 def _table_box(table: TableContent, style: TextStyle, slot: Box, roomy: Box) -> Box:

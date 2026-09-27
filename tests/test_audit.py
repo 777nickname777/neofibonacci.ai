@@ -1108,3 +1108,43 @@ def test_identical_pages_of_parallel_variants_are_asked_once(
     asked = [hashlib.sha256(image).hexdigest() for image in vlm.images]
     assert len(asked) == len(set(asked)), "одна и та же картинка спрошена дважды"
     assert len(asked) <= len(pages)
+
+
+def test_table_header_is_written_as_the_template_writes_on_its_fill(
+    pack, recorded_dir, tmp_path
+):
+    """Шапка таблицы `vk_workspace` — белым по синему, как пишет шаблон.
+
+    Контраст проходил и у чёрного, но это нарушение стиля. Раньше образцом
+    «как шаблон пишет на синем» служила картинка на синей плашке: её цвет
+    текста — умолчание стиля, чёрный.
+    """
+    from deckwright.audit.deterministic.template_fidelity import text_on_fill
+    from deckwright.pipeline import run_variant
+
+    template = Path(__file__).parents[1] / "data" / "templates" / "vk_workspace.pptx"
+    if not template.exists():
+        pytest.skip("нет шаблона vk_workspace")
+    result = run_variant(
+        template_path=template, pack=pack, cfg=load_config(CONFIG),
+        client=RecordedClient(recorded_dir), variant="dense", output_dir=tmp_path,
+    )
+    tables = [
+        (slide, element)
+        for slide in result.deck.slides
+        for element in slide.all_elements()
+        if element.table is not None and element.table.header_fill is not None
+    ]
+    assert tables, "в колоде нет таблицы"
+    slide, element = tables[0]
+    fill = element.table.header_fill
+    assert element.table.header_style.color.rgb == "FFFFFF", fill.rgb
+    assert not text_on_fill(slide, result.spec)
+
+    # Та же шапка чёрным — находка.
+    black = element.table.header_style.model_copy(
+        update={"color": element.table.header_style.color.model_copy(update={"rgb": "000000"})}
+    )
+    element.table = element.table.model_copy(update={"header_style": black})
+    found = text_on_fill(slide, result.spec)
+    assert [issue.check_id for issue in found] == ["template.text_color_off_template"]

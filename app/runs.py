@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from deckwright.audit import rewrite as rewrite_step
 from deckwright.audit.contextual.runner import SharedAudit
 from deckwright.config import Config
 from deckwright.content.ingest import IngestInput, ingest
@@ -33,7 +34,7 @@ from deckwright.pipeline import (
     complete_variant,
     lay_out_variant,
 )
-from deckwright.schemas import ContentPack, DeckPurpose
+from deckwright.schemas import ContentPack, DeckPurpose, FixKind
 
 
 @dataclass
@@ -207,3 +208,14 @@ def apply(state: RunState, variant: str, client: StructuredClient | None = None)
             variant_state.applying = False
 
     threading.Thread(target=work, name=f"deckwright-fix-{variant}", daemon=True).start()
+
+
+def applicable(issue) -> bool:
+    """Умеет ли «Применить отмеченное» что-то сделать с этой находкой.
+
+    Автоматическая правка — да; переписывание текста моделью — да. Находка
+    «к сведению» (плотность, повтор, вопрос к человеку) исправления не имеет:
+    отмеченная, она не попадала в применяемое, и кнопка показывала «(0)» при
+    отмеченных пунктах.
+    """
+    return issue.fix.kind is FixKind.AUTOMATIC or bool(rewrite_step.rewritable([issue]))
