@@ -1210,3 +1210,53 @@ def test_donor_photo_left_is_a_finding(clean, tmp_path):
     presentation.save(spoiled)
     found = donor_photos(spoiled, clean.deck)
     assert [(i.check_id, i.slide_index) for i in found] == [("integrity.donor_photo_left", 2)]
+
+
+def test_audit_image_is_scaled_to_contextual_dpi(clean):
+    """Модель получает картинку при `audit.contextual_dpi`, а не при dpi рендера."""
+    import io
+
+    from PIL import Image
+
+    from deckwright.audit.contextual.runner import scaled_page
+
+    page = clean.pages[0]
+    full = Image.open(page)
+    small = Image.open(io.BytesIO(scaled_page(page, 0.625)))
+    assert small.width == round(full.width * 0.625)
+    assert scaled_page(page, 1.0) == page.read_bytes()
+
+
+def test_resolution_comparison_counts_lost_and_new_findings(clean):
+    """Сравнение разрешений: база дважды, находки меньших dpi сверяются с первой."""
+    import io
+
+    from PIL import Image
+
+    from deckwright.audit.probe import compare_resolutions, format_resolution_report
+
+    full = Image.open(clean.pages[0]).width
+
+    class Stub:
+        mocked = True
+        prompt_tokens = 0
+
+        def complete(self, step, prompt, schema, images=None):
+            width = Image.open(io.BytesIO(images[0])).width
+            self.prompt_tokens += width
+            # Мелкая картинка «теряет» находку — ровно то, что ищет сравнение.
+            return schema.model_validate(
+                {"answers": [{"check_id": "content.has_content", "passed": width < 0.8 * full}]}
+            )
+
+    cfg = load_config(CONFIG)
+    passes = compare_resolutions(
+        Stub(), clean.deck, clean.plan, clean.pages[:2],
+        ["content.has_content"], base_dpi=96, dpis=[96, 60], workers=1,
+    )
+    assert [(p.dpi, p.repeat) for p in passes] == [(96, 1), (96, 2), (60, 1)]
+    assert passes[0].findings == passes[1].findings and passes[0].findings
+    assert not passes[2].findings
+    report = format_resolution_report("clean", passes)
+    assert "нет 1:content.has_content" in report
+    assert cfg.audit.contextual_dpi

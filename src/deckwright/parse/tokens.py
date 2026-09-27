@@ -162,7 +162,11 @@ def background_signature(bg: etree._Element | None, part) -> str | None:
             except (KeyError, AttributeError):
                 blob = rid.encode()
             child.set(f"{{{R_NS}}}{attr}", hashlib.sha1(blob).hexdigest()[:12])
-    return hashlib.sha1(etree.tostring(node, method="c14n")).hexdigest()[:16]
+    # Исключающая канонизация: объявления пространств имён, которые разметка
+    # не использует (`p14`, `mc` у слайда шаблона), в отпечаток не входят —
+    # иначе перенесённая один в один жёлтая заливка экзаменов считалась другой.
+    canonical = etree.tostring(node, method="c14n", exclusive=True)
+    return hashlib.sha1(canonical).hexdigest()[:16]
 
 
 _LUMINANCE_MODS = ("lumMod", "lumOff", "shade", "tint")

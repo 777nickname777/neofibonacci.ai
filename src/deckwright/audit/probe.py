@@ -327,3 +327,97 @@ def format_report(
             )
 
     return "\n".join(lines)
+
+
+# ── Разрешение картинок аудита: те же вопросы при разных dpi ────────────────
+
+
+@dataclass
+class ResolutionPass:
+    """Один проход картиночного аудита по колоде при одном разрешении."""
+
+    dpi: int
+    repeat: int
+    findings: dict[tuple[int, str], str] = field(default_factory=dict)
+    prompt_tokens: int = 0
+    seconds: float = 0.0
+    problems: list[str] = field(default_factory=list)
+
+
+def compare_resolutions(
+    client,
+    deck: DeckIR,
+    plan: DeckPlan,
+    pages: list[Path],
+    check_ids: list[str],
+    base_dpi: int,
+    dpis: list[int],
+    workers: int,
+    repeats_at_base: int = 2,
+) -> list[ResolutionPass]:
+    """Картиночный аудит одной колоды при каждом разрешении из `dpis`.
+
+    Картинка — PNG рендера при `base_dpi`, уменьшенный так же, как в прогоне
+    (`runner.scaled_page`). Базовое разрешение спрашивается дважды: модель
+    отвечает не детерминированно, и расхождение двух одинаковых проходов —
+    мерка шума, с которой сравниваются меньшие разрешения.
+    """
+    from deckwright.audit.contextual.runner import _image_pass
+
+    passes: list[ResolutionPass] = []
+    for dpi in dpis:
+        for repeat in range(repeats_at_base if dpi == base_dpi else 1):
+            before = getattr(client, "prompt_tokens", 0)
+            started = time.monotonic()
+            issues, problems = _image_pass(
+                deck,
+                plan,
+                pages,
+                client,
+                check_ids,
+                workers,
+                None,
+                None,
+                scale=min(1.0, dpi / base_dpi),
+            )
+            passes.append(
+                ResolutionPass(
+                    dpi=dpi,
+                    repeat=repeat + 1,
+                    findings={(i.slide_index, i.check_id): i.message for i in issues},
+                    prompt_tokens=getattr(client, "prompt_tokens", 0) - before,
+                    seconds=round(time.monotonic() - started, 1),
+                    problems=problems,
+                )
+            )
+    return passes
+
+
+def format_resolution_report(name: str, passes: list[ResolutionPass]) -> str:
+    """Таблица: токены, время, находки и их совпадение с первым базовым проходом."""
+    base = passes[0]
+    lines = [
+        f"### {name}",
+        "",
+        "| dpi | проход | токенов на входе | с | находок | как в базе | потеряно | новых |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for item in passes:
+        same = set(item.findings) & set(base.findings)
+        lost = sorted(set(base.findings) - set(item.findings))
+        new = sorted(set(item.findings) - set(base.findings))
+        lines.append(
+            f"| {item.dpi} | {item.repeat} | {item.prompt_tokens} | {item.seconds} | "
+            f"{len(item.findings)} | {len(same)} | {len(lost)} | {len(new)} |"
+        )
+    for item in passes[1:]:
+        lost = sorted(set(base.findings) - set(item.findings))
+        new = sorted(set(item.findings) - set(base.findings))
+        mark = f"- {item.dpi} dpi/{item.repeat}:"
+        for key in lost:
+            lines.append(f"{mark} нет {key[0]}:{key[1]} — {base.findings[key]}")
+        for key in new:
+            lines.append(f"{mark} новое {key[0]}:{key[1]} — {item.findings[key]}")
+        for problem in item.problems:
+            lines.append(f"{mark} не спрошено — {problem}")
+    return "\n".join(lines)
