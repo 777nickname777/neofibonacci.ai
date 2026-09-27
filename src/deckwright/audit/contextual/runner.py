@@ -38,6 +38,7 @@ from deckwright.schemas import (
     FixKind,
     Issue,
     ProposedFix,
+    SlideIntent,
     SlideIR,
 )
 
@@ -93,6 +94,9 @@ class SharedTextPass:
             self._value = compute()
             self._done = True
             return (*self._value, False)
+
+
+_BARE_INTENTS = (SlideIntent.TITLE, SlideIntent.SECTION)
 
 
 def _questions(check_ids: list[str]) -> str:
@@ -157,6 +161,10 @@ def _image_pass(
 ) -> tuple[list[Issue], list[str]]:
     prompt = load_prompt("audit_slide.v1", prompts_dir)
     questions = _questions(check_ids)
+    # Титул и разделитель по замыслу состоят из заголовка: вопрос «есть ли
+    # на слайде содержание» для них ложный. Живой прогон 4×4: модель
+    # отвечала «нет» на титуле в половине колод.
+    bare_questions = _questions([cid for cid in check_ids if cid != "content.has_content"])
     by_index = {slide.index: slide for slide in plan.slides}
 
     def ask(slide: SlideIR) -> tuple[list[Issue], str]:
@@ -168,7 +176,11 @@ def _image_pass(
             title=planned.takeaway_title if planned else "",
             intent=planned.intent.value if planned else "",
             body=_slide_body(slide),
-            questions=questions,
+            questions=(
+                bare_questions
+                if planned and planned.intent in _BARE_INTENTS
+                else questions
+            ),
         )
         try:
             answers = client.complete(

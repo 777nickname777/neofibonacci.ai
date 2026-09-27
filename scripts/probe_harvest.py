@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 _STAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
-_RUN = re.compile(r"===== ПРОГОН (\S+) × (\S+) =====")
+_RUN = re.compile(r"===== ПРОГОН ([^\s$]+) × ([^\s$]+) =====")
 _BEGIN = re.compile(r"----- НАЧАЛО (\S+) -----")
 _END = re.compile(r"----- КОНЕЦ (\S+) -----")
 

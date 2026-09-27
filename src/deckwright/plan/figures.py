@@ -117,11 +117,16 @@ def verify(figure: Figure, pack: ContentPack) -> str | None:
         return f"число {figure.text!r} ссылается на отсутствующие факты: {', '.join(missing)}"
 
     if figure.kind is FigureKind.CITED:
+        # У факта одно поле `value`, а чисел в нём бывает больше: «бюджет 48
+        # млн, освоено 31 млн» — value 48, и «31» тоже цитата. Числа текста
+        # факта — такие же значения, как `value`.
         cited = [
             value
             for fact_id in figure.fact_ids
             for value in (
-                series[fact_id] if fact_id in series else [facts[fact_id].value]
+                series[fact_id]
+                if fact_id in series
+                else [facts[fact_id].value, *sorted(numbers_in(facts[fact_id].text))]
             )
             if value is not None
         ]

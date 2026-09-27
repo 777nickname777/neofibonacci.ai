@@ -1026,3 +1026,34 @@ def test_shared_text_pass_asks_the_model_once_for_parallel_variants():
 
     assert len(calls) == 1
     assert sorted(reused for _, _, reused in answers) == [False, True, True]
+
+
+def test_title_slide_is_not_asked_whether_it_has_content(clean):
+    """Титул по замыслу — один заголовок: вопрос о содержании для него ложный."""
+    from deckwright.audit.contextual.runner import _BARE_INTENTS, _image_pass
+    from deckwright.schemas import SlideIntent
+
+    cfg = load_config(CONFIG)
+    image_ids = cfg.audit.checks_by_mode("image")
+    if "content.has_content" not in image_ids:
+        pytest.skip("вопрос о содержании задаётся не по картинке")
+    intents = {slide.index: slide.intent for slide in clean.plan.slides}
+    if SlideIntent.TITLE not in intents.values():
+        pytest.skip("в записанном плане нет титула")
+
+    prompts: dict[int, str] = {}
+
+    class RecordingVlm:
+        def complete(self, step, prompt, schema, images=None):
+            index = next(
+                i for i, intent in intents.items()
+                if clean.plan.slides[i - 1].takeaway_title in prompt
+            )
+            prompts[index] = prompt
+            return schema.model_validate({"answers": []})
+
+    _image_pass(clean.deck, clean.plan, clean.pages, RecordingVlm(), image_ids, 1, None, None)
+
+    for index, prompt in prompts.items():
+        asked = "content.has_content" in prompt
+        assert asked == (intents[index] not in _BARE_INTENTS), index

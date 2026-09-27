@@ -288,3 +288,19 @@ def test_cited_figure_sign_is_direction_not_value(pack):
     fact = pack.facts[0]
     figure = Figure(text=f"-{fact.value:g}", kind=FigureKind.CITED, fact_ids=[fact.id])
     assert verify(figure, pack) is None
+
+
+def test_cited_figure_may_be_any_number_of_the_fact_text(pack):
+    """«Бюджет 48 млн, освоено 31 млн»: value 48, но «31» — тоже цитата факта."""
+    from deckwright.schemas import ContentPack
+
+    two = ContentPack.model_validate(
+        {
+            **pack.model_dump(),
+            "facts": [{"id": "f1", "text": "Бюджет 48 млн рублей, освоено 31 млн",
+                       "source_doc_id": pack.facts[0].source_doc_id, "value": 48}],
+        }
+    )
+    assert verify(Figure(text="31 млн", kind=FigureKind.CITED, fact_ids=["f1"]), two) is None
+    problem = verify(Figure(text="35 млн", kind=FigureKind.CITED, fact_ids=["f1"]), two)
+    assert problem and "таких значений нет" in problem

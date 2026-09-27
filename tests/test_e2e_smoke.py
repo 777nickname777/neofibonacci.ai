@@ -264,3 +264,29 @@ def test_parallel_variants_match_sequential_ones(template_paths, pack, recorded_
         parallel = [result.deck for result in pool.map(complete_variant, laid_out)]
 
     assert parallel == sequential
+
+
+def test_donor_placeholder_is_not_duplicated_by_the_layout(pack, recorded_dir, tmp_path):
+    """Плейсхолдер донора заменяет пустой плейсхолдер макета, а не стоит рядом.
+
+    На `zelenie_investicii` у каждого слайда было два заголовка в одной рамке:
+    текст ложился в пустой из макета, а клон донора показывал «Вставьте
+    заголовок».
+    """
+    from collections import Counter
+    from pathlib import Path
+
+    from pptx import Presentation
+
+    from deckwright.render.pptx_writer import _ph_key
+
+    path = Path(__file__).parents[1] / "data" / "holdout" / "zelenie_investicii.pptx"
+    if not path.exists():
+        pytest.skip("нет шаблона holdout")
+    result = run_variant(
+        template_path=path, pack=pack, cfg=load_config(CONFIG),
+        client=RecordedClient(recorded_dir), variant="dense", output_dir=tmp_path,
+    )
+    for index, slide in enumerate(Presentation(str(result.pptx)).slides, start=1):
+        keys = Counter(_ph_key(shape._element) for shape in slide.placeholders)
+        assert all(count == 1 for count in keys.values()), (index, keys)

@@ -801,13 +801,29 @@ def _clone_composition(slide, donor: tuple[object, list], width: int, height: in
     пересказывается.
     """
     donor_part, donor_shapes = donor
+    # `add_slide` уже создал пустые плейсхолдеры макета. Если донор несёт
+    # свой плейсхолдер того же типа и номера, пустой — дубль в той же рамке:
+    # текст ложился в него шрифтом макета, а клон донора оставался с
+    # подсказкой «Вставьте заголовок» (`zelenie_investicii`, каждый слайд).
+    blank = {_ph_key(shape._element): shape._element for shape in slide.placeholders}
     for element in donor_shapes:
         tag = etree.QName(element).localname
         if tag in ("nvGrpSpPr", "grpSpPr"):
             continue
         if _off_canvas(element, width, height):
             continue
+        duplicate = blank.pop(_ph_key(element), None)
+        if duplicate is not None:
+            duplicate.getparent().remove(duplicate)
         clone_shape(element, donor_part, slide)
+
+
+def _ph_key(element) -> tuple[str, str] | None:
+    """Тип и номер плейсхолдера фигуры; `None`, если это не плейсхолдер."""
+    ph = element.xpath("./*/*[local-name()='nvPr']/*[local-name()='ph']")
+    if not ph:
+        return None
+    return ph[0].get("type", "body"), ph[0].get("idx", "0")
 
 
 def count_native_shapes(path: str | Path) -> list[int]:
