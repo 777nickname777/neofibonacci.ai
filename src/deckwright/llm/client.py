@@ -26,6 +26,7 @@ import queue
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import TypeVar
 
 from openai import (
@@ -52,6 +53,16 @@ T = TypeVar("T", bound=BaseModel)
 _UNKNOWN_PARAM = re.compile(
     r"(?:unknown|unsupported|unrecognized|invalid)[^\"']*[\"']?(\w+)[\"']?", re.IGNORECASE
 )
+
+@dataclass
+class StepUsage:
+    """Расход одного шага: сколько раз звали, сколько он ответил и как долго."""
+
+    calls: int = 0
+    completion_tokens: int = 0
+    answer_chars: int = 0
+    slowest_seconds: float = 0.0
+
 
 _SCHEMA_INSTRUCTION = (
     "Ответь строго одним объектом JSON по схеме ниже. "
@@ -146,6 +157,10 @@ class LiveClient:
         # Ответы 429. SDK сам повторяет их с выдержкой; счётчик нужен, чтобы
         # было видно, упёрлись ли мы в лимит провайдера, а не гадать по времени.
         self.rate_limit_hits = 0
+        # Расход по шагам: суммарные счётчики склеивают разбор входа и план, а
+        # решать, что сокращать, можно только по ответу каждого шага отдельно.
+        self.by_step: dict[str, StepUsage] = {}
+        self._step_lock = threading.Lock()
         self.limiter = RateLimiter(
             tokens_per_minute=cfg.tokens_per_minute,
             requests_per_minute=cfg.requests_per_minute,
@@ -237,6 +252,14 @@ class LiveClient:
             self.slowest_call_seconds, round(time.monotonic() - started, 3)
         )
         usage = getattr(response, "usage", None)
+        with self._step_lock:
+            record = self.by_step.setdefault(step, StepUsage())
+            record.calls += 1
+            record.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+            record.answer_chars += len(response.choices[0].message.content or "")
+            record.slowest_seconds = max(
+                record.slowest_seconds, round(time.monotonic() - started, 3)
+            )
         actual = 0
         if usage is not None:
             self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0

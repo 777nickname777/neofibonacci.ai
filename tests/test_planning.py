@@ -304,3 +304,11 @@ def test_cited_figure_may_be_any_number_of_the_fact_text(pack):
     assert verify(Figure(text="31 млн", kind=FigureKind.CITED, fact_ids=["f1"]), two) is None
     problem = verify(Figure(text="35 млн", kind=FigureKind.CITED, fact_ids=["f1"]), two)
     assert problem and "таких значений нет" in problem
+
+
+def test_figure_without_kind_is_cited():
+    """plan_deck.v6: у процитированного числа модель `kind` не пишет."""
+    figure = Figure.model_validate({"text": "26", "fact_ids": ["f3"]})
+    assert figure.kind is FigureKind.CITED
+    with pytest.raises(ValidationError, match="без формулы"):
+        Figure.model_validate({"text": "в 3 раза", "kind": "derived", "fact_ids": ["f3"]})

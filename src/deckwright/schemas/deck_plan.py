@@ -65,7 +65,9 @@ class Figure(BaseModel):
 
     # Как число написано на слайде: «4.6», «34 %», «9 минут».
     text: str = Field(min_length=1)
-    kind: FigureKind
+    # Процитированное — по умолчанию: так модель не пишет `kind` у каждого
+    # числа, а ответ плана — это секунды ожидания (plan_deck.v6).
+    kind: FigureKind = FigureKind.CITED
     # Идентификаторы фактов, на которых оно держится.
     fact_ids: list[str] = Field(min_length=1)
     # Для выведенного — выражение над значениями фактов: «f1 / f3».

@@ -174,6 +174,42 @@ def test_invented_numbers_are_dropped_with_their_facts(inputs):
     assert "Время первого ответа, ч | 26 | 14 | 9" in client.prompts[0]
 
 
+def test_numbers_written_as_words_are_in_the_input(inputs):
+    """«Рассматривались четыре системы», «из пяти тысяч карточек» — числа входа.
+
+    Живой прогон docx × zelenie: модель перенесла их в факты числами 4 и
+    5 000, и сверка, читавшая во входе только цифры, отбросила настоящие
+    факты. Выдуманное число при этом по-прежнему отбрасывается.
+    """
+    client = StubClient(
+        {
+            "topic": "Перевод поддержки на единую CRM",
+            "purpose": "project",
+            "facts": [
+                {"text": "Выбор CRM занял месяц, рассмотрено четыре системы",
+                 "doc_id": "d1", "value": 4},
+                {"text": "Правила склейки отлаживали на выборке из 5 тысяч карточек",
+                 "doc_id": "d1", "value": 5000, "unit": "карточек"},
+                {"text": "Рассматривались тринадцать систем", "doc_id": "d1", "value": 13},
+            ],
+        }
+    )
+    result = ingest(IngestInput(files=[inputs / "crm_report.docx"]), client)
+    assert [fact.value for fact in result.pack.facts] == [4, 5000]
+    assert result.dropped["facts"] == 1
+
+
+def test_word_numbers():
+    from deckwright.content.grounding import word_numbers
+
+    assert word_numbers("рассмотрено четыре системы") == {4}
+    assert word_numbers("на выборке из пяти тысяч карточек") == {5000}
+    assert word_numbers("две тысячи триста сорок пять") == {2345}
+    assert word_numbers("тысячи клиентов") == {1000}
+    # Множитель после цифр — масштаб записи, а не отдельная тысяча.
+    assert word_numbers("перенесено 412 тыс. обращений") == set()
+
+
 def test_short_brief_becomes_a_pack_without_numbers():
     """Бриф в две фразы: тема, назначение пользователя, запрос его словами."""
     client = StubClient(

@@ -127,7 +127,7 @@ def build_plan(
     шаблона модель работает по одним порогам плотности из ТЗ — план тогда
     может не влезть, и разбираться с этим придётся фиттеру.
     """
-    prompt = load_prompt("plan_deck.v5", prompts_dir)
+    prompt = load_prompt("plan_deck.v6", prompts_dir)
     budget = (
         compute_budget(
             spec, max_bullets, max_words_per_bullet, substitution_slack=substitution_slack

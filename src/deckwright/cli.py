@@ -221,6 +221,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         for warning in manifest.warnings:
             print(f"[{variant}] ⚠ {warning}", file=sys.stderr)
 
+    # Ответ каждого шага отдельно: по суммарным счётчикам не видно, план
+    # или разбор входа съедает время.
+    for role, used in (("llm", client), ("vlm", vlm_client)):
+        for step, record in sorted(getattr(used, "by_step", {}).items()):
+            print(
+                f"[шаг] {role} {step}: вызовов {record.calls}, ответ "
+                f"{record.completion_tokens} ток. / {record.answer_chars} симв., "
+                f"самый долгий {record.slowest_seconds}с"
+            )
+
     total = time.monotonic() - run_started
     parse_seconds = round(pack_seconds + template_parse_seconds, 3)
     summary = RunSummary(

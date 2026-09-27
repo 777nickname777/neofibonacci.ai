@@ -278,7 +278,7 @@ jobs:
                 > "$OUT/run.log" 2>&1 || echo "прогон упал: код $?"
               # Поэтапное время вариантов и вызовы модели: без них не видно,
               # куда уходит бюджет (живой dense 145 с на любом шаблоне).
-              grep -E '^\[(вход|прогон)\]|^\[(dense|balanced|airy)\] (parse|разбор|модель|итерация)|ВНЕ|Traceback|Error' "$OUT/run.log" || true
+              grep -E '^\[(вход|прогон|шаг)\]|^\[(dense|balanced|airy)\] (parse|разбор|модель|итерация)|ВНЕ|Traceback|Error' "$OUT/run.log" || true
               python - "$OUT" <<'PY'
           import collections, glob, json, pathlib, sys
           out = pathlib.Path(sys.argv[1])
