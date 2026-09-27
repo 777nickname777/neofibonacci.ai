@@ -191,3 +191,30 @@ def test_both_copies_are_counted_by_the_token_limiter():
     assert window["requests_in_window"] == 2
     assert window["tokens_in_window"] == 2 * 4700
     assert window["waits"] == 0, "ограничитель заставил дубль ждать"
+
+
+def test_waiter_wakes_when_an_answer_frees_room():
+    """Ответ заменил оценку фактом — ждущий вызов идёт сразу, а не через минуту.
+
+    Оценка берёт `max_tokens` целиком, факт втрое меньше: без пробуждения по
+    `settle` аудит трёх вариантов спал рядом со свободным местом.
+    """
+    import threading
+    import time
+
+    limiter = RateLimiter(tokens_per_minute=10_000)
+    first = limiter.acquire(8_000)
+    passed = threading.Event()
+
+    def second() -> None:
+        limiter.acquire(5_000)
+        passed.set()
+
+    thread = threading.Thread(target=second, daemon=True)
+    thread.start()
+    time.sleep(0.1)
+    assert not passed.is_set(), "в окне нет места: второй вызов обязан ждать"
+
+    limiter.settle(first, 1_000)
+    assert passed.wait(2.0), "место освободилось, а вызов всё ещё ждёт"
+    assert limiter.waits == 1
