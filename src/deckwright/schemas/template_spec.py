@@ -40,6 +40,9 @@ class SlotRole(StrEnum):
     LOGO = "logo"
     FOOTER = "footer"
     SLIDE_NUMBER = "slide_number"
+    # Порядковый номер элемента повторителя («01», «02» в узлах маршрута):
+    # содержание туда не кладётся, номер пишет рендер.
+    ORDINAL = "ordinal"
     DECOR = "decor"
     UNKNOWN = "unknown"
 
@@ -187,6 +190,38 @@ class LayoutSpec(BaseModel):
     is_dark: bool = False
 
 
+# Места без текста: их «цвет текста» — умолчание стиля, а не решение шаблона.
+_NOT_WRITTEN = frozenset(
+    {
+        SlotRole.IMAGE,
+        SlotRole.ICON,
+        SlotRole.CHART,
+        SlotRole.TABLE,
+        SlotRole.DECOR,
+        SlotRole.LOGO,
+        SlotRole.UNKNOWN,
+    }
+)
+
+
+class TableGrid(BaseModel):
+    """Таблица, собранная из прямоугольников: шапка и строки-повторитель.
+
+    Шаблон-бланк рисует таблицу фигурами: ячейки шапки — залитые
+    прямоугольники с надписью, строки — одинаковые полосы с надписями в
+    колонках. Нативной таблицы там нет, и данные ложатся по этим местам.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    repeater_id: str
+    # Места шапки и ячеек строки — слева направо, колонка к колонке.
+    header_slot_ids: list[str] = Field(min_length=2)
+    cell_slot_ids: list[str] = Field(min_length=2)
+    # Шапка колонки номеров («№»): номера пишет рендер, подпись остаётся.
+    number_header_id: str | None = None
+
+
 class Pattern(BaseModel):
     """Композиция, снятая со слайда-примера. Основная единица вёрстки.
 
@@ -219,6 +254,8 @@ class Pattern(BaseModel):
     # половины слайда. Незаполненный элемент такой композиции не убрать —
     # она годится, только если заполнены все.
     baked_items: bool = False
+    # Таблица из прямоугольников, если композиция её несёт.
+    table_grid: TableGrid | None = None
     # Как определён класс: правилами по структуре или моделью по рендеру.
     provenance: Provenance
 
@@ -474,6 +511,44 @@ class TemplateSpec(BaseModel):
                 for slot in repeater.item_slots:
                     add(slot.role, slot.text_color, under)
         return counts
+
+    def colors_written_on(self, fill: Color) -> list[Color]:
+        """Цвета текста шаблона на подложке цвета `fill`, от частого к редкому.
+
+        Считаются только места, где шаблон и правда пишет: у картинки на
+        синей плашке `vk_workspace` «цвет текста» — умолчание стиля, и он
+        выдавался за то, что шаблон пишет на синем чёрным.
+        """
+        return self._colors_written(lambda backdrop: backdrop.rgb == fill.rgb)
+
+    def colors_written_on_tone(self, dark: bool) -> list[Color]:
+        """Цвета текста шаблона на тёмных или на светлых подложках.
+
+        Нужны, когда на заливке ровно этого цвета шаблон ничего не писал:
+        как он пишет на тёмном вообще — тоже решение шаблона.
+        """
+        return self._colors_written(lambda backdrop: (backdrop.luminance < 0.5) == dark)
+
+    def _colors_written(self, matches) -> list[Color]:
+        seen: dict[str, tuple[int, Color]] = {}
+
+        def count(backdrop: Color | None, color: Color | None, slot: Slot) -> None:
+            if backdrop is None or color is None or not matches(backdrop):
+                return
+            if slot.role in _NOT_WRITTEN or not (slot.placeholder_text or "").strip():
+                return
+            number, _ = seen.get(color.rgb, (0, color))
+            seen[color.rgb] = (number + 1, color)
+
+        for pattern in self.patterns:
+            for slot in pattern.slots:
+                color = slot.text_color or (slot.style.color if slot.style else None)
+                count(slot.backdrop, color, slot)
+            for repeater in pattern.repeaters:
+                for backdrop in repeater.member_backdrops:
+                    for slot in repeater.item_slots:
+                        count(backdrop, slot.text_color, slot)
+        return [color for _, color in sorted(seen.values(), key=lambda item: -item[0])]
 
     def _written_pairs(self) -> set[tuple[str, str]]:
         backgrounds = {layout.id: layout.background for layout in self.layouts}

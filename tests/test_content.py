@@ -124,6 +124,12 @@ def test_numbers_are_found_in_any_spelling():
     assert ungrounded("выросло с 71 % до 88 % за 3 месяца", numbers, small=10) == [88.0]
 
 
+def test_label_digit_is_not_a_thousands_group():
+    """«Q1 412» из строки таблицы — квартал и значение, а не число 1 412."""
+    assert source_numbers("Q1 412\nQ2 365") == {1.0, 2.0, 412.0, 365.0}
+    assert source_numbers("бюджет 1 200 000 руб") == {1200000.0}
+
+
 def test_invented_numbers_are_dropped_with_their_facts(inputs):
     """Модель вернула факт с числом, которого во входе нет: он не доходит до пакета."""
     client = StubClient(
@@ -166,6 +172,42 @@ def test_invented_numbers_are_dropped_with_their_facts(inputs):
     # В запросе модели — текст документа с местами и таблица строками.
     assert "[d1] crm_report.docx (docx)" in client.prompts[0]
     assert "Время первого ответа, ч | 26 | 14 | 9" in client.prompts[0]
+
+
+def test_numbers_written_as_words_are_in_the_input(inputs):
+    """«Рассматривались четыре системы», «из пяти тысяч карточек» — числа входа.
+
+    Живой прогон docx × zelenie: модель перенесла их в факты числами 4 и
+    5 000, и сверка, читавшая во входе только цифры, отбросила настоящие
+    факты. Выдуманное число при этом по-прежнему отбрасывается.
+    """
+    client = StubClient(
+        {
+            "topic": "Перевод поддержки на единую CRM",
+            "purpose": "project",
+            "facts": [
+                {"text": "Выбор CRM занял месяц, рассмотрено четыре системы",
+                 "doc_id": "d1", "value": 4},
+                {"text": "Правила склейки отлаживали на выборке из 5 тысяч карточек",
+                 "doc_id": "d1", "value": 5000, "unit": "карточек"},
+                {"text": "Рассматривались тринадцать систем", "doc_id": "d1", "value": 13},
+            ],
+        }
+    )
+    result = ingest(IngestInput(files=[inputs / "crm_report.docx"]), client)
+    assert [fact.value for fact in result.pack.facts] == [4, 5000]
+    assert result.dropped["facts"] == 1
+
+
+def test_word_numbers():
+    from deckwright.content.grounding import word_numbers
+
+    assert word_numbers("рассмотрено четыре системы") == {4}
+    assert word_numbers("на выборке из пяти тысяч карточек") == {5000}
+    assert word_numbers("две тысячи триста сорок пять") == {2345}
+    assert word_numbers("тысячи клиентов") == {1000}
+    # Множитель после цифр — масштаб записи, а не отдельная тысяча.
+    assert word_numbers("перенесено 412 тыс. обращений") == set()
 
 
 def test_short_brief_becomes_a_pack_without_numbers():
@@ -282,3 +324,28 @@ def test_quote_block_gets_its_text_and_author():
     )
     items = resolve_quotes(plan, pack).slides[0].blocks[0].items
     assert items == ["«Видим клиента целиком»", "— Мария Ковалёва, руководитель линии"]
+
+
+def test_text_block_with_only_fact_ids_gets_fact_text():
+    """Абзац с одними `fact_ids` получает текст фактов: иначе слайд пустой."""
+    from deckwright.plan.planner import resolve_facts
+    from deckwright.schemas import DeckPlan
+
+    pack = ContentPack.model_validate(
+        {
+            "brief": {"topic": "Склад", "purpose": "project"},
+            "documents": [{"id": "d1", "name": "r.pdf", "kind": "pdf"}],
+            "facts": [{"id": "f1", "text": "Энергия снизилась на 23 %", "source_doc_id": "d1"}],
+        }
+    )
+    plan = DeckPlan.model_validate(
+        {
+            "title": "Склад", "purpose": "project",
+            "slides": [{"index": 1, "intent": "ask", "takeaway_title": "Утвердить план",
+                        "blocks": [{"id": "b1", "kind": "paragraph", "fact_ids": ["f1"]},
+                                   {"id": "b2", "kind": "kpi", "fact_ids": ["f1"]}]}],
+        }
+    )
+    blocks = resolve_facts(plan, pack).slides[0].blocks
+    assert blocks[0].items == ["Энергия снизилась на 23 %"]
+    assert blocks[1].items == []

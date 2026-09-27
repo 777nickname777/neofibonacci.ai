@@ -20,7 +20,10 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import threading
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +39,7 @@ from deckwright.schemas import (
     FixKind,
     Issue,
     ProposedFix,
+    SlideIntent,
     SlideIR,
 )
 
@@ -67,6 +71,62 @@ class ContextualResult:
     # Текстовый проход не задавался заново: ответы принесены с другого
     # варианта. Не то же самое, что «пропущен»: вопрос задан, просто один раз.
     text_reused: bool = False
+
+
+class SharedAudit:
+    """Вопросы модели, общие для вариантов одной колоды, идущих параллельно.
+
+    Текстовый проход идёт по плану, а план у вариантов один: вариант,
+    пришедший первым, задаёт вопрос, остальные ждут его ответа на блокировке
+    — их проход по картинкам тем временем идёт.
+
+    Картинки у вариантов часто одинаковые: титул, финал, слайды одной
+    композиции (живой прогон `zelenie_investicii`: 26 разных страниц из 39).
+    Одна и та же картинка с тем же текстом вопроса — один вызов: лимит 40 000
+    токенов в минуту на аккаунт, и проход по картинкам трёх вариантов упирался
+    в него (≈140 с аудита на вариант).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._done = False
+        self._value: tuple[list[Issue], str] = ([], "")
+        self._slides: dict[str, Future] = {}
+
+    def get(self, compute: Callable[[], tuple[list[Issue], str]]) -> tuple[list[Issue], str, bool]:
+        """Ответ текстового прохода и признак «получен другим вариантом»."""
+        with self._lock:
+            if self._done:
+                return (*self._value, True)
+            self._value = compute()
+            self._done = True
+            return (*self._value, False)
+
+    def slide(self, key: str, compute: Callable[[], SlideAnswers]) -> SlideAnswers:
+        """Ответы по картинке: первый спросивший спрашивает, остальные ждут.
+
+        Отказ модели не разделяется: ждавший вариант спрашивает сам — иначе
+        одна сетевая ошибка стоила бы находок трёх вариантов.
+        """
+        with self._lock:
+            future = self._slides.get(key)
+            owner = future is None
+            if owner:
+                future = self._slides[key] = Future()
+        if owner:
+            try:
+                future.set_result(compute())
+            except Exception as failure:
+                future.set_exception(failure)
+                raise
+            return future.result()
+        try:
+            return future.result()
+        except Exception:
+            return compute()
+
+
+_BARE_INTENTS = (SlideIntent.TITLE, SlideIntent.SECTION)
 
 
 def _questions(check_ids: list[str]) -> str:
@@ -128,9 +188,14 @@ def _image_pass(
     workers: int,
     prompts_dir: str | Path | None,
     only_slides: set[int] | None,
+    shared: SharedAudit | None = None,
 ) -> tuple[list[Issue], list[str]]:
-    prompt = load_prompt("audit_slide.v1", prompts_dir)
+    prompt = load_prompt("audit_slide.v2", prompts_dir)
     questions = _questions(check_ids)
+    # Титул и разделитель по замыслу состоят из заголовка: вопрос «есть ли
+    # на слайде содержание» для них ложный. Живой прогон 4×4: модель
+    # отвечала «нет» на титуле в половине колод.
+    bare_questions = _questions([cid for cid in check_ids if cid != "content.has_content"])
     by_index = {slide.index: slide for slide in plan.slides}
 
     def ask(slide: SlideIR) -> tuple[list[Issue], str]:
@@ -142,12 +207,24 @@ def _image_pass(
             title=planned.takeaway_title if planned else "",
             intent=planned.intent.value if planned else "",
             body=_slide_body(slide),
-            questions=questions,
+            questions=(
+                bare_questions
+                if planned and planned.intent in _BARE_INTENTS
+                else questions
+            ),
         )
+        image = Path(page).read_bytes()
+
+        def call() -> SlideAnswers:
+            return client.complete("audit_slide", text, SlideAnswers, images=[image])
+
         try:
-            answers = client.complete(
-                "audit_slide", text, SlideAnswers, images=[Path(page).read_bytes()]
-            )
+            if shared is None:
+                answers = call()
+            else:
+                # Ключ — всё, что видит модель: картинка и текст вопроса.
+                key = hashlib.sha256(image + text.encode("utf-8")).hexdigest()
+                answers = shared.slide(key, call)
         except Exception as failure:  # отказ модели не должен ронять аудит
             return [], f"слайд {slide.index}: {failure}"
         found = [
@@ -223,7 +300,7 @@ def run(
     cfg,
     only_slides: set[int] | None = None,
     prompts_dir: str | Path | None = None,
-    text_findings: list[Issue] | None = None,
+    text_findings: list[Issue] | SharedAudit | None = None,
 ) -> ContextualResult:
     """Оба контекстных прохода. Невыполненное честно перечисляется.
 
@@ -249,6 +326,24 @@ def run(
             result.skipped[check_id] = "модель недоступна: вопрос не задан"
         return result
 
+    # Текстовый проход — один вызов по плану, от картинок не зависит. Он идёт
+    # одновременно с проходом по картинкам, а не после него: по очереди это
+    # сумма двух самых долгих вызовов аудита вместо большего из них.
+    text_ids = audit.checks_by_mode("text")
+
+    def compute() -> tuple[list[Issue], str]:
+        return _text_pass(plan, client, text_ids, prompts_dir)
+
+    def text_part() -> tuple[list[Issue], str, bool]:
+        if audit.text_checks_once_per_deck and isinstance(text_findings, list):
+            return text_findings, "", True
+        if audit.text_checks_once_per_deck and isinstance(text_findings, SharedAudit):
+            return text_findings.get(compute)
+        return (*compute(), False)
+
+    text_pool = ThreadPoolExecutor(max_workers=1) if text_ids else None
+    text_job = text_pool.submit(text_part) if text_pool is not None else None
+
     image_ids = audit.checks_by_mode("image")
     if image_ids:
         issues, problems = _image_pass(
@@ -260,22 +355,20 @@ def run(
             cfg.vlm.max_concurrent_calls,
             prompts_dir,
             only_slides,
+            text_findings if isinstance(text_findings, SharedAudit) else None,
         )
         result.issues.extend(issues)
         if problems:
             for check_id in image_ids:
                 result.skipped[check_id] = "; ".join(problems[:3])
 
-    text_ids = audit.checks_by_mode("text")
-    if text_ids:
-        if text_findings is not None and audit.text_checks_once_per_deck:
-            result.issues.extend(text_findings)
-            result.text_reused = True
-        else:
-            issues, problem = _text_pass(plan, client, text_ids, prompts_dir)
-            result.issues.extend(issues)
-            if problem:
-                for check_id in text_ids:
-                    result.skipped[check_id] = problem
+    if text_job is not None:
+        issues, problem, reused = text_job.result()
+        text_pool.shutdown()
+        result.issues.extend(issues)
+        result.text_reused = reused
+        if problem:
+            for check_id in text_ids:
+                result.skipped[check_id] = problem
 
     return result

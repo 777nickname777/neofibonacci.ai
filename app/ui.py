@@ -272,6 +272,22 @@ def _findings_panel(state: runs.RunState, variant_state: runs.VariantState, clie
 
     for number, issue in enumerate(report.issues, start=1):
         columns = st.columns([1, 14])
+        if not runs.applicable(issue):
+            # Отметить нечего применять: галочки нет, есть подпись.
+            columns[0].checkbox(
+                f"{number}",
+                value=False,
+                disabled=True,
+                key=_pick_key(state, variant_state.name, issue.key, number),
+                label_visibility="collapsed",
+            )
+            variant_state.selected.discard(issue.key)
+            columns[1].markdown(
+                f"**{number}. {issue.check_id}** · слайд {issue.slide_index} · "
+                f"{issue.severity.value} · только к сведению  \n"
+                f"{issue.message}"
+            )
+            continue
         # `value=` здесь не передаётся намеренно. Вместе с `key=` он означает
         # «сбросить виджет к этому значению на каждом перезапуске скрипта», а
         # перезапуск случается на каждое нажатие — галочка снималась сама, и

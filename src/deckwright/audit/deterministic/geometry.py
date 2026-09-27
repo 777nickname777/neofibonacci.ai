@@ -186,11 +186,22 @@ def margins(slide: SlideIR, deck: DeckIR, spec: TemplateSpec) -> list[Issue]:
     right = deck.slide_width_emu - grid.margin_right_emu
     bottom = deck.slide_height_emu - grid.margin_bottom_emu
 
+    # Поля выведены эвристикой по рёбрам фигур, а рамка слота — сам шаблон.
+    # Элемент, стоящий ровно в рамке слота своего паттерна, стоит там, где
+    # его поставил автор шаблона: на `zelenie_investicii` заголовок шаблона
+    # выше выведенного поля на 0.12″, и «правка» каждого заголовка стоила
+    # полной пересборки и повторного аудита моделью всех слайдов.
+    slot_boxes = {
+        pattern.id: {slot.box for slot in pattern.slots} for pattern in spec.patterns
+    }
+
     found: list[Issue] = []
     for element in slide.all_elements():
         if element.role in _MARGIN_EXEMPT:
             continue
         box = element.box
+        if box in slot_boxes.get(element.provenance.ref, ()):
+            continue
         over = max(left - box.x, top - box.y, box.right - right, box.bottom - bottom)
         if over <= GRID_TOLERANCE_EMU:
             continue

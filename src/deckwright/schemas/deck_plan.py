@@ -65,12 +65,27 @@ class Figure(BaseModel):
 
     # Как число написано на слайде: «4.6», «34 %», «9 минут».
     text: str = Field(min_length=1)
-    kind: FigureKind
+    # Процитированное — по умолчанию: так модель не пишет `kind` у каждого
+    # числа, а ответ плана — это секунды ожидания (plan_deck.v6).
+    kind: FigureKind = FigureKind.CITED
     # Идентификаторы фактов, на которых оно держится.
     fact_ids: list[str] = Field(min_length=1)
     # Для выведенного — выражение над значениями фактов: «f1 / f3».
     # Допустимы только идентификаторы, числа и четыре действия.
     formula: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _kind_from_formula(cls, data):
+        """Без `kind` число с формулой — выведенное, без формулы — цитата.
+
+        plan_deck.v6 разрешил не писать `kind`, и модель опускала его и у
+        выведенного числа: «cited с формулой» не проходило проверку, и план
+        запрашивался заново (живой прогон docx × vk_tech: 3 вызова вместо 1).
+        """
+        if isinstance(data, dict) and not data.get("kind"):
+            data = {**data, "kind": "derived" if data.get("formula") else "cited"}
+        return data
 
     @model_validator(mode="after")
     def _derived_shows_its_working(self) -> Figure:

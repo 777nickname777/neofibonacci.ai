@@ -74,6 +74,13 @@ class RateLimiter:
         self._sleep = sleep
         self._entries: deque[_Entry] = deque()
         self._lock = threading.Lock()
+        # Ожидающий просыпается не только когда старая запись уходит из окна,
+        # но и когда ответ поправил оценку фактом. Оценка берёт `max_tokens`
+        # целиком (1500 у аудита при фактических ~420): без пробуждения по
+        # `settle` вызов спал до минуты рядом с уже свободным местом. Живой
+        # прогон docx × zelenie: аудит 121 с при 54 тыс. токенов — лимиту
+        # хватило бы 81 с.
+        self._freed = threading.Condition(self._lock)
         self.waited_seconds = 0.0
         self.waits = 0
 
@@ -111,6 +118,7 @@ class RateLimiter:
         токенов из ответа.
         """
         estimated_tokens = max(1, estimated_tokens)
+        waited = False
         while True:
             with self._lock:
                 now = self._now()
@@ -119,7 +127,13 @@ class RateLimiter:
                     entry = _Entry(at=now, tokens=estimated_tokens)
                     self._entries.append(entry)
                     return entry
-                self.waits += 1
+                if not waited:
+                    self.waits += 1
+                    waited = True
+                if self._sleep is time.sleep:
+                    self._freed.wait(delay)
+                    self.waited_seconds += self._now() - now
+                    continue
                 self.waited_seconds += delay
             self._sleep(delay)
 
@@ -127,6 +141,7 @@ class RateLimiter:
         """Заменяет оценку фактом из ответа модели."""
         with self._lock:
             entry.tokens = max(1, actual_tokens)
+            self._freed.notify_all()
 
     def snapshot(self) -> dict[str, int | float]:
         with self._lock:

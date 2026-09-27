@@ -961,3 +961,190 @@ def test_number_written_on_a_slide_but_absent_from_the_input_is_caught(pack):
     plan.slides[2].blocks[0].items.append("Рост выручки на 37 % за год")
     found = undeclared_numbers(plan, pack)
     assert [issue.check_id for issue in found] == ["content.undeclared_number"]
+
+
+def test_element_in_its_template_slot_is_not_a_margin_violation(pack):
+    """Поля выведены эвристикой, рамка слота — сам шаблон.
+
+    На `zelenie_investicii` заголовок шаблона стоит выше выведенного поля на
+    0.12″: находка на каждом слайде стоила полной пересборки колоды.
+    """
+    from deckwright.layout.matcher import build_deck_ir
+    from deckwright.layout.strategy import Strategy
+    from deckwright.parse.opener import parse_template
+    from deckwright.schemas import DeckPlan
+
+    path = Path(__file__).parents[1] / "data" / "holdout" / "zelenie_investicii.pptx"
+    if not path.exists():
+        pytest.skip("нет шаблона holdout")
+    spec = parse_template(path)
+    cfg = load_config(CONFIG)
+    recorded = Path(__file__).parent / "fixtures" / "recorded" / "plan_deck.json"
+    plan = DeckPlan.model_validate_json(recorded.read_text("utf-8"))
+    deck, _ = build_deck_ir(
+        spec, plan, cfg.variants[0].name, Strategy.from_config(cfg.variants[0]), pack=pack
+    )
+    in_slot = [
+        (slide, element)
+        for slide in deck.slides
+        for element in slide.all_elements()
+        if any(
+            element.box == slot.box
+            for pattern in spec.patterns if pattern.id == element.provenance.ref
+            for slot in pattern.slots
+        )
+    ]
+    assert in_slot, "ни один элемент не стоит в рамке слота"
+    flagged = {
+        tuple(issue.element_ids)
+        for slide, _ in in_slot
+        for issue in geometry.margins(slide, deck, spec)
+    }
+    assert not any((element.id,) in flagged for _, element in in_slot)
+
+
+def test_shared_text_pass_asks_the_model_once_for_parallel_variants():
+    """Три варианта параллельно — один текстовый проход, два берут его ответ."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from deckwright.audit.contextual.runner import SharedAudit
+
+    shared = SharedAudit()
+    calls = []
+    lock = threading.Lock()
+
+    def compute():
+        with lock:
+            calls.append(1)
+        time.sleep(0.05)
+        return [], ""
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        answers = list(pool.map(lambda _: shared.get(compute), range(3)))
+
+    assert len(calls) == 1
+    assert sorted(reused for _, _, reused in answers) == [False, True, True]
+
+
+def test_title_slide_is_not_asked_whether_it_has_content(clean):
+    """Титул по замыслу — один заголовок: вопрос о содержании для него ложный."""
+    from deckwright.audit.contextual.runner import _BARE_INTENTS, _image_pass
+    from deckwright.schemas import SlideIntent
+
+    cfg = load_config(CONFIG)
+    image_ids = cfg.audit.checks_by_mode("image")
+    if "content.has_content" not in image_ids:
+        pytest.skip("вопрос о содержании задаётся не по картинке")
+    intents = {slide.index: slide.intent for slide in clean.plan.slides}
+    if SlideIntent.TITLE not in intents.values():
+        pytest.skip("в записанном плане нет титула")
+
+    prompts: dict[int, str] = {}
+
+    class RecordingVlm:
+        def complete(self, step, prompt, schema, images=None):
+            index = next(
+                i for i, intent in intents.items()
+                if clean.plan.slides[i - 1].takeaway_title in prompt
+            )
+            prompts[index] = prompt
+            return schema.model_validate({"answers": []})
+
+    _image_pass(clean.deck, clean.plan, clean.pages, RecordingVlm(), image_ids, 1, None, None)
+
+    for index, prompt in prompts.items():
+        asked = "content.has_content" in prompt
+        assert asked == (intents[index] not in _BARE_INTENTS), index
+
+
+def test_identical_pages_of_parallel_variants_are_asked_once(
+    template_paths, pack, recorded_dir, tmp_path
+):
+    """Одинаковая картинка с тем же вопросом — один вызов на три варианта.
+
+    Лимит токенов в минуту общий на аккаунт: проход по картинкам трёх
+    вариантов упирался в него, хотя треть страниц у вариантов совпадает.
+    """
+    import hashlib
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from deckwright.audit.contextual.runner import SharedAudit
+    from deckwright.pipeline import complete_variant, lay_out_variant
+
+    class CountingVlm:
+        mocked = True
+
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.images: list[bytes] = []
+
+        def complete(self, step, prompt, schema, images=None):
+            if step == "audit_slide":
+                with self.lock:
+                    self.images.append(images[0])
+            return schema.model_validate({"answers": []})
+
+    cfg = load_config(CONFIG)
+    vlm = CountingVlm()
+    shared = SharedAudit()
+    client = RecordedClient(recorded_dir)
+    prepared = None
+    laid_out = []
+    for variant in ("dense", "balanced", "airy"):
+        laid = lay_out_variant(
+            template_path=template_paths[0], pack=pack, cfg=cfg, client=client,
+            variant=variant, output_dir=tmp_path / variant, prepared=prepared,
+            vlm_client=vlm, text_findings=shared, fix_mode="off",
+        )
+        prepared = laid.prepared
+        laid_out.append(laid)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(complete_variant, laid_out))
+
+    pages = [page.read_bytes() for result in results for page in result.pages]
+    asked = [hashlib.sha256(image).hexdigest() for image in vlm.images]
+    assert len(asked) == len(set(asked)), "одна и та же картинка спрошена дважды"
+    assert len(asked) <= len(pages)
+
+
+def test_table_header_is_written_as_the_template_writes_on_its_fill(
+    pack, recorded_dir, tmp_path
+):
+    """Шапка таблицы `vk_workspace` — белым по синему, как пишет шаблон.
+
+    Контраст проходил и у чёрного, но это нарушение стиля. Раньше образцом
+    «как шаблон пишет на синем» служила картинка на синей плашке: её цвет
+    текста — умолчание стиля, чёрный.
+    """
+    from deckwright.audit.deterministic.template_fidelity import text_on_fill
+    from deckwright.pipeline import run_variant
+
+    template = Path(__file__).parents[1] / "data" / "templates" / "vk_workspace.pptx"
+    if not template.exists():
+        pytest.skip("нет шаблона vk_workspace")
+    result = run_variant(
+        template_path=template, pack=pack, cfg=load_config(CONFIG),
+        client=RecordedClient(recorded_dir), variant="dense", output_dir=tmp_path,
+    )
+    tables = [
+        (slide, element)
+        for slide in result.deck.slides
+        for element in slide.all_elements()
+        if element.table is not None and element.table.header_fill is not None
+    ]
+    assert tables, "в колоде нет таблицы"
+    slide, element = tables[0]
+    fill = element.table.header_fill
+    assert element.table.header_style.color.rgb == "FFFFFF", fill.rgb
+    assert not text_on_fill(slide, result.spec)
+
+    # Та же шапка чёрным — находка.
+    black = element.table.header_style.model_copy(
+        update={"color": element.table.header_style.color.model_copy(update={"rgb": "000000"})}
+    )
+    element.table = element.table.model_copy(update={"header_style": black})
+    found = text_on_fill(slide, result.spec)
+    assert [issue.check_id for issue in found] == ["template.text_color_off_template"]

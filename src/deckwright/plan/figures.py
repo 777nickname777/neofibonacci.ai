@@ -107,31 +107,51 @@ def verify(figure: Figure, pack: ContentPack) -> str | None:
         return None
 
     facts = {fact.id: fact for fact in pack.facts}
-    missing = [fact_id for fact_id in figure.fact_ids if fact_id not in facts]
+    # Число с графика модель честно ссылает на ряд: «412 МВт·ч» — точка ряда
+    # s1, а не факт. Ряд — такой же источник, его точки сверяются как значения.
+    series = {item.id: [point.value for point in item.points] for item in pack.series}
+    missing = [
+        fact_id for fact_id in figure.fact_ids if fact_id not in facts and fact_id not in series
+    ]
     if missing:
         return f"число {figure.text!r} ссылается на отсутствующие факты: {', '.join(missing)}"
 
     if figure.kind is FigureKind.CITED:
+        # У факта одно поле `value`, а чисел в нём бывает больше: «бюджет 48
+        # млн, освоено 31 млн» — value 48, и «31» тоже цитата. Числа текста
+        # факта — такие же значения, как `value`.
         cited = [
-            fact.value
+            value
             for fact_id in figure.fact_ids
-            if (fact := facts[fact_id]).value is not None
+            for value in (
+                series[fact_id]
+                if fact_id in series
+                else [facts[fact_id].value, *sorted(numbers_in(facts[fact_id].text))]
+            )
+            if value is not None
         ]
         if not cited:
             return None
-        if not any(abs(written - value) <= abs(value) * TOLERANCE for value in cited):
+        # Знак — запись направления: «−23 %» на слайде и «снизилось на 23 %»
+        # в факте — одно число. Сверка входа (`grounding`) знак тоже не читает.
+        if not any(
+            abs(abs(written) - abs(value)) <= abs(value) * TOLERANCE for value in cited
+        ):
             return (
                 f"число {figure.text!r} объявлено процитированным, но в фактах "
                 f"{', '.join(figure.fact_ids)} таких значений нет: {cited}"
             )
         return None
 
+    # Точки ряда в формулу входят числами («41 - 32»), имени у точки нет;
+    # по имени подставляются только факты.
+    fact_ids = [fact_id for fact_id in figure.fact_ids if fact_id in facts]
     values = {
         fact_id: facts[fact_id].value
-        for fact_id in figure.fact_ids
+        for fact_id in fact_ids
         if facts[fact_id].value is not None
     }
-    if len(values) != len(figure.fact_ids):
+    if len(values) != len(set(fact_ids)):
         return (
             f"число {figure.text!r} выведено из фактов без числовых значений: "
             f"пересчитать нечем"

@@ -187,6 +187,8 @@ def _seats_all(
         seats = _seat(pattern, block, role, free, taken)
         if seats is None:
             return False
+        if _grid_seated(pattern, seats):
+            role = SlotRole.BODY
         # Место под график или таблицу — не меньше четверти слайда и в
         # запасном пути: иначе график садился в иконку 0.24 дюйма
         # (`vk_workspace`, airy, слайд 8) и пропадал со слайда.
@@ -433,6 +435,8 @@ def _blocks_fit(
             # композиция шаблона, а вынужденная мера.
             return False
         slot = seats[0][0]
+        if _grid_seated(pattern, seats):
+            role = SlotRole.BODY
         if role in _DATA_ROLES:
             if not _roomy_for_data(slot.box, spec):
                 return False
@@ -863,6 +867,11 @@ def _spread(
     if len(block.items) < 2:
         return None
     by_id = {slot.id: slot for slot in free}
+    # Повторителей на слайде бывает несколько: две кнопки «готово / доработка»
+    # и три колонки проверки на шаблоне-бланке. Первый попавшийся уводил три
+    # пункта в две кнопки; берётся тот, где на все пункты хватает элементов,
+    # а среди таких — с самым вместительным местом.
+    options = []
     for repeater in pattern.repeaters:
         for item_slot in sorted(repeater.item_slots, key=lambda s: -s.box.area):
             if item_slot.role is not wanted:
@@ -875,13 +884,16 @@ def _spread(
                 members.append(slot)
             if len(members) < 2:
                 continue
-            count = min(len(block.items), len(members))
-            prefix = f"{repeater.id}_"
-            free[:] = [slot for slot in free if not slot.id.startswith(prefix)]
-            return list(
-                zip(members[:count], _chunks(list(block.items), count), strict=True)
-            )
-    return None
+            covered = min(len(block.items), len(members))
+            options.append(((covered, item_slot.box.area), repeater, members))
+            break
+    if not options:
+        return None
+    _, repeater, members = max(options, key=lambda option: option[0])
+    count = min(len(block.items), len(members))
+    prefix = f"{repeater.id}_"
+    free[:] = [slot for slot in free if not slot.id.startswith(prefix)]
+    return list(zip(members[:count], _chunks(list(block.items), count), strict=True))
 
 
 def _seat(
@@ -907,13 +919,108 @@ def _seat(
     ]
 
 
+# Оформление шапки — не дальше этого под заголовком или подзаголовком.
+_HEADER_DECOR_REACH = 274_320  # 0.3″
+
+
+def _below(area: Box, top: int) -> Box:
+    """Область, обрезанная сверху: то, что ниже `top`."""
+    if top <= area.y or top >= area.bottom:
+        return area
+    return area.model_copy(update={"y": top, "h": area.bottom - top})
+
+
+def _header_bottom(pattern: Pattern | None, title_bottom: int) -> int:
+    """Низ шапки слайда: заголовок, подзаголовок и оформление сразу под ними.
+
+    График рос от низа заголовка и ложился на подзаголовок и прогресс-бар
+    шаблона-бланка, а уборка под ним снимала сегменты прогресс-бара.
+    """
+    if pattern is None:
+        return title_bottom
+    bottom = max(
+        [title_bottom]
+        + [slot.box.bottom for slot in pattern.slots if slot.role is SlotRole.SUBTITLE]
+    )
+    for box in sorted(pattern.decor, key=lambda item: item.y):
+        if bottom <= box.y <= bottom + _HEADER_DECOR_REACH:
+            bottom = max(bottom, box.bottom)
+    return bottom
+
+
+def _grid_seats(pattern: Pattern | None, block, free: list) -> list | None:
+    """Таблица плана — по ячейкам таблицы из прямоугольников.
+
+    Шапка — названия колонок, строки — элементы повторителя, ячейка — своё
+    место. Колонок больше, чем в шаблоне, или строк больше, чем у донора, —
+    не сюда: дорисованная строка была бы текстом без полосы.
+    """
+    if pattern is None or pattern.table_grid is None:
+        return None
+    if block.kind is not BlockKind.TABLE or block.table is None:
+        return None
+    grid = pattern.table_grid
+    repeater = next((r for r in pattern.repeaters if r.id == grid.repeater_id), None)
+    columns, rows = block.table.columns, block.table.rows
+    if repeater is None or not rows or len(columns) > len(grid.cell_slot_ids):
+        return None
+    if len(rows) > repeater.observed_count:
+        return None
+    fixed = {slot.id: slot for slot in pattern.slots}
+    by_id = {slot.id: slot for slot in free}
+    seats: list[tuple[object, list[str]]] = []
+    number = fixed.get(grid.number_header_id or "")
+    if number is not None and number.placeholder_text:
+        # Подпись колонки номеров — часть таблицы, номера пишет рендер.
+        seats.append((number, [number.placeholder_text]))
+    for head_id, name in zip(grid.header_slot_ids, columns, strict=False):
+        seats.append((fixed[head_id], [name]))
+    for index, row in enumerate(rows):
+        for cell_id, value in zip(grid.cell_slot_ids, row, strict=False):
+            slot = by_id.get(f"{repeater.id}_{index}_{cell_id}")
+            if slot is None:
+                return None
+            seats.append((slot, [value]))
+    prefix = f"{repeater.id}_"
+    free[:] = [slot for slot in free if not slot.id.startswith(prefix)]
+    return seats
+
+
+def _grid_seated(pattern: Pattern | None, seats) -> bool:
+    """Разложен ли блок по таблице из прямоугольников: тогда это текст."""
+    if pattern is None or pattern.table_grid is None or not seats:
+        return False
+    grid = pattern.table_grid
+    ids = {seat.id for seat, _ in seats if seat is not None}
+    return bool(ids & set(grid.header_slot_ids)) or any(
+        seat_id.startswith(f"{grid.repeater_id}_") for seat_id in ids
+    )
+
+
 def _seat_raw(
     pattern: Pattern | None, block, role: SlotRole, free: list, taken: list[Box]
 ) -> list[tuple[object, list[str]]] | None:
+    grid = _grid_seats(pattern, block, free)
+    if grid is not None:
+        return grid
     split = _split_heading(pattern, block, free, taken)
     if split:
         return split
-    for wanted in (role, *_TEXT_FALLBACK.get(role, ())):
+    roles = (role, *_TEXT_FALLBACK.get(role, ()))
+    # Список раскладывается по элементам повторителя любой подходящей роли
+    # раньше, чем садится целиком в одиночную рамку: на шаблоне-бланке у
+    # слайда ресурсов под четырьмя колонками стоит строка «Бюджет /
+    # ограничение», и три пункта уходили в неё, мимо колонок.
+    if block.kind in _SPREAD_KINDS and len(block.items) > 1:
+        for wanted in roles:
+            pool = list(free)
+            spread = _spread(pattern, block, wanted, free, taken)
+            if spread:
+                return [
+                    (_absorb(pattern, seat, pool, free, taken, block), lines)
+                    for seat, lines in spread
+                ]
+    for wanted in roles:
         pool = list(free)
         spread = _spread(pattern, block, wanted, free, taken)
         if spread:
@@ -1435,6 +1542,10 @@ def _free_band(
     floor = max(
         (box.bottom for box in taken if box.bottom <= area.bottom), default=area.y
     )
+    # И ниже шапки: подзаголовок и прогресс-бар под заголовком не заняты
+    # нашим содержанием, но место — их.
+    if isinstance(container, Pattern):
+        floor = _header_bottom(container, floor)
     top = min(max(area.y, floor), area.bottom - _MIN_BAND_SHARE_DIVISOR)
     remaining = max(_MIN_BAND_SHARE_DIVISOR, area.bottom - top)
     share = max(1, bands - index)
@@ -1599,22 +1710,7 @@ def _header_text(fill: Color, spec: TemplateSpec | None = None, size_pt: float =
 
 def _written_on(fill: Color, spec: TemplateSpec) -> list[Color]:
     """Цвета текста шаблона на подложке цвета `fill`, от частого к редкому."""
-    seen: dict[str, tuple[int, Color]] = {}
-
-    def count(backdrop: Color | None, color: Color | None) -> None:
-        if backdrop is None or color is None or backdrop.rgb != fill.rgb:
-            return
-        number, _ = seen.get(color.rgb, (0, color))
-        seen[color.rgb] = (number + 1, color)
-
-    for pattern in spec.patterns:
-        for slot in pattern.slots:
-            count(slot.backdrop, slot.text_color or (slot.style.color if slot.style else None))
-        for repeater in pattern.repeaters:
-            for backdrop in repeater.member_backdrops:
-                for slot in repeater.item_slots:
-                    count(backdrop, slot.text_color)
-    return [color for _, color in sorted(seen.values(), key=lambda item: -item[0])]
+    return spec.colors_written_on(fill)
 
 
 def _table_box(table: TableContent, style: TextStyle, slot: Box, roomy: Box) -> Box:
@@ -2140,6 +2236,9 @@ def build_slide_ir(
             continue
         role = strategy.role_for(block)
         seats = _seat(pattern, block, role, free_slots, taken)
+        if _grid_seated(pattern, seats):
+            # Таблица из прямоугольников — надписи по ячейкам, а не `a:tbl`.
+            role = SlotRole.BODY
         slot = seats[0][0] if seats else None
         if slot is None and bookend:
             # У обложки или финала шаблона нет места под этот текст. Класть
@@ -2204,7 +2303,7 @@ def build_slide_ir(
         # в свободную область ниже заголовка, в полях шаблона, не заходя на
         # соседние блоки. Последний блок — чтобы не занять место следующих.
         if role in _DATA_ROLES and slot is not None:
-            top = title_bottom + spec.slide_height_emu // DATA_GAP_SHARE
+            top = _header_bottom(pattern, title_bottom) + spec.slide_height_emu // DATA_GAP_SHARE
             if position == len(plan_slide.blocks) - 1:
                 box = _free_region(box, _content_area(spec, container), top, others, spec)
             elif box.y < top:
@@ -2227,7 +2326,10 @@ def build_slide_ir(
             pack,
             background,
             is_dark,
-            _content_area(spec, container),
+            _below(
+                _content_area(spec, container),
+                _header_bottom(pattern, title_bottom) + spec.slide_height_emu // DATA_GAP_SHARE,
+            ),
             plan_slide,
         )
         if native is not None:

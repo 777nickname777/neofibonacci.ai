@@ -6,17 +6,19 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 
+from deckwright.audit.contextual.runner import SharedAudit
 from deckwright.config import load_config
 from deckwright.content.ingest import IngestError, IngestInput, ingest
 from deckwright.content.readers import UnsupportedInput
 from deckwright.environment import run_checks
 from deckwright.llm.base import StructuredClient
 from deckwright.llm.fake import RecordedClient
-from deckwright.pipeline import run_variant
+from deckwright.pipeline import complete_variant, lay_out_variant, run_variant
 from deckwright.schemas import ContentPack, DeckPurpose, RunSummary
 
 DEFAULT_CONFIG = Path("configs/config.yaml")
@@ -133,12 +135,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     variants = [v.name for v in cfg.variants] if args.variant is None else [args.variant]
     output_root = Path(args.output or cfg.run.output_dir)
 
-    # План от варианта не зависит: три варианта раскладывают одно и то же
-    # содержание по-разному. Планируется он один раз и переиспользуется —
-    # иначе три одинаковых ответа модели стоят втрое дороже и втрое дольше
-    # (по замеру 34 с на вызов).
-    prepared = None
-    text_findings = None
     # Бюджет ТЗ — на генерацию трёх вариантов вместе, без разбора входа.
     # Сверяется итог по часам, а не сумма манифестов: между вариантами тоже
     # идёт время.
@@ -146,8 +142,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
     run_id = started_at.strftime("run-%Y%m%d-%H%M%S")
     variant_seconds: dict[str, float] = {}
     template_parse_seconds = 0.0
+
+    # Раскладка — по очереди: вариант избегает композиций, взятых предыдущими,
+    # и порядок здесь и есть результат. Секунды, модель зовётся один раз — на
+    # план. Сборка, аудит и цикл исправления — параллельно: по очереди три
+    # варианта на `zelenie_investicii` стоили 364 с из 300.
+    # План от варианта не зависит: планируется один раз и переиспользуется —
+    # иначе три одинаковых ответа модели стоят втрое дороже и втрое дольше.
+    # Текстовый проход аудита идёт по плану и тоже задаётся один раз.
+    shared_audit = SharedAudit()
+    prepared = None
+    laid_out = []
     for variant in variants:
-        result = run_variant(
+        laid = lay_out_variant(
             template_path=template,
             pack=pack,
             cfg=cfg,
@@ -156,18 +163,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
             output_dir=output_root / variant,
             fix_mode=args.fix,
             prepared=prepared,
-            text_findings=text_findings,
+            text_findings=shared_audit,
             vlm_client=vlm_client,
         )
-        prepared = result.prepared
-        if args.save_plan and variant == variants[0]:
-            Path(args.save_plan).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.save_plan).write_text(
-                prepared.plan.model_dump_json(indent=2), encoding="utf-8"
-            )
-        # Вопросы текстового прохода аудита задаются по плану, а план один на
-        # три варианта: опечатки и единый язык от вёрстки не зависят.
-        text_findings = result.text_findings
+        prepared = laid.prepared
+        laid_out.append(laid)
+    if args.save_plan:
+        Path(args.save_plan).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.save_plan).write_text(
+            prepared.plan.model_dump_json(indent=2), encoding="utf-8"
+        )
+    with ThreadPoolExecutor(max_workers=len(laid_out)) as pool:
+        results = list(pool.map(complete_variant, laid_out))
+
+    for variant, result in zip(variants, results, strict=True):
         manifest = result.manifest
         variant_seconds[variant] = manifest.generation_seconds
         template_parse_seconds += manifest.parse_seconds
@@ -211,6 +220,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         for warning in manifest.warnings:
             print(f"[{variant}] ⚠ {warning}", file=sys.stderr)
+
+    # Ответ каждого шага отдельно: по суммарным счётчикам не видно, план
+    # или разбор входа съедает время.
+    for role, used in (("llm", client), ("vlm", vlm_client)):
+        for step, record in sorted(getattr(used, "by_step", {}).items()):
+            print(
+                f"[шаг] {role} {step}: вызовов {record.calls}, ответ "
+                f"{record.completion_tokens} ток. / {record.answer_chars} симв., "
+                f"самый долгий {record.slowest_seconds}с"
+                + (f"; повтор из-за: {record.last_error}" if record.last_error else "")
+            )
 
     total = time.monotonic() - run_started
     parse_seconds = round(pack_seconds + template_parse_seconds, 3)

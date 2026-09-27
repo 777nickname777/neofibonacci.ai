@@ -25,6 +25,12 @@ class Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+# Внутренние поля текстовой рамки, которые фиттер допускает, когда рамка их
+# не объявила: 0.1″ по горизонтали и 0.05″ по вертикали на обе стороны.
+FRAME_INSET_X_EMU = 91_440
+FRAME_INSET_Y_EMU = 45_720
+
+
 class Box(Frozen):
     """Прямоугольник в EMU от левого верхнего угла слайда.
 
@@ -37,6 +43,12 @@ class Box(Frozen):
     y: int
     w: int = Field(gt=0)
     h: int = Field(gt=0)
+    # Внутренние поля текстовой рамки, сумма по оси (слева + справа, сверху +
+    # снизу), если рамка их объявила. `None` — умолчания PowerPoint. Шаблон без
+    # плейсхолдеров набирает заголовок в рамку ровно в строку с нулевыми
+    # полями: с умолчаниями фиттер считал, что туда не влезает ни строки.
+    inset_x: int | None = Field(default=None, ge=0)
+    inset_y: int | None = Field(default=None, ge=0)
 
     @property
     def right(self) -> int:

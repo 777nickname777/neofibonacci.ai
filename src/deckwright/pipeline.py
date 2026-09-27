@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from deckwright.audit import rewrite as rewrite_step
+from deckwright.audit.contextual.runner import SharedAudit
 from deckwright.audit.fixers import apply as apply_fixes
 from deckwright.audit.report import audit_deck
 from deckwright.config import Config
@@ -143,8 +144,9 @@ class _RunContext:
     budget: LengthBudget | None
     vlm_client: StructuredClient | None
     # Находки текстового прохода: он идёт по плану, а план у вариантов один.
-    # Заполняется после первого аудита и переезжает в следующий вариант.
-    text_findings: list[Issue] | None = None
+    # Заполняется после первого аудита и переезжает в следующий вариант; у
+    # вариантов, идущих параллельно, — общий `SharedAudit`.
+    text_findings: list[Issue] | SharedAudit | None = None
     # Куда сообщать о начале этапа. Нужно интерфейсу: прогон идёт минуты.
     on_stage: Callable[[str], None] | None = None
     # Реестр композиций вариантов из `PreparedPlan`: пересборка после правки
@@ -556,6 +558,28 @@ def _finish(
     )
 
 
+@dataclass
+class LaidOut:
+    """Вариант после раскладки: всё, что нужно сборке, рендеру и аудиту.
+
+    Раскладка и сборка разделены ради параллельности. Раскладка идёт по
+    очереди: план общий, а композиции вариант выбирает, избегая уже взятых
+    предыдущими (A12) — порядок здесь и есть результат. Сборка, аудит и цикл
+    исправления от соседей не зависят и идут одновременно.
+    """
+
+    manifest: RunManifest
+    spec: TemplateSpec
+    plan: DeckPlan
+    deck: DeckIR
+    layout_issues: list
+    ctx: _RunContext
+    prepared: PreparedPlan
+    mode: str
+    client: StructuredClient
+    template_path: Path
+
+
 def run_variant(
     template_path: str | Path,
     pack: ContentPack,
@@ -571,6 +595,42 @@ def run_variant(
     on_stage: Callable[[str], None] | None = None,
 ) -> PipelineResult:
     """Прогоняет один вариант вёрстки от шаблона до аудита.
+
+    Раскладка и сборка подряд; параметры — как у `lay_out_variant`.
+    """
+    return complete_variant(
+        lay_out_variant(
+            template_path,
+            pack,
+            cfg,
+            client,
+            variant,
+            output_dir,
+            run_id=run_id,
+            vlm_client=vlm_client,
+            fix_mode=fix_mode,
+            prepared=prepared,
+            text_findings=text_findings,
+            on_stage=on_stage,
+        )
+    )
+
+
+def lay_out_variant(
+    template_path: str | Path,
+    pack: ContentPack,
+    cfg: Config,
+    client: StructuredClient,
+    variant: str,
+    output_dir: str | Path,
+    run_id: str | None = None,
+    vlm_client: StructuredClient | None = None,
+    fix_mode: str | None = None,
+    prepared: PreparedPlan | None = None,
+    text_findings: list[Issue] | SharedAudit | None = None,
+    on_stage: Callable[[str], None] | None = None,
+) -> LaidOut:
+    """Разбор шаблона, план и раскладка одного варианта.
 
     `vlm_client` отдельный от `client`: контекстные проверки идут в модель со
     зрением, а планирование — в текстовую. Без него выполняются только
@@ -715,9 +775,28 @@ def run_variant(
         on_stage=on_stage,
         layouts=prepared.layouts,
     )
+    return LaidOut(
+        manifest=manifest,
+        spec=spec,
+        plan=plan,
+        deck=deck,
+        layout_issues=layout_issues,
+        ctx=ctx,
+        prepared=prepared,
+        mode=mode,
+        client=client,
+        template_path=template_path,
+    )
+
+
+def complete_variant(laid: LaidOut) -> PipelineResult:
+    """Сборка, аудит и цикл исправления разложенного варианта."""
+    manifest, spec, plan, deck = laid.manifest, laid.spec, laid.plan, laid.deck
+    layout_issues, ctx, prepared = laid.layout_issues, laid.ctx, laid.prepared
+    cfg, pack, client, template_path = ctx.cfg, ctx.pack, laid.client, laid.template_path
     built = _build(deck, plan, spec, pack, ctx, manifest, template_path)
 
-    if mode == "auto":
+    if laid.mode == "auto":
         deck, plan, built, layout_issues = _fix_loop(
             deck,
             plan,

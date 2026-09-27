@@ -23,14 +23,15 @@ from dataclasses import dataclass
 
 from deckwright.layout.text_metrics import (
     DEFAULT_LINE_HEIGHT,
-    FRAME_INSET_X_EMU,
-    FRAME_INSET_Y_EMU,
+    LAST_LINE_HEIGHT,
     MEASUREMENT_SLACK,
     FontMetrics,
+    frame_inset_x,
+    frame_inset_y,
     measure_height_emu,
     wrap,
 )
-from deckwright.schemas import Box
+from deckwright.schemas import EMU_PER_POINT, Box
 
 
 @dataclass(frozen=True)
@@ -60,10 +61,17 @@ class FitResult:
 def _height_emu(
     text: str, metrics: FontMetrics, size_pt: float, box: Box, line_height: float
 ) -> tuple[int, int]:
-    usable_width = max(1, box.w - FRAME_INSET_X_EMU)
+    usable_width = max(1, box.w - frame_inset_x(box))
     lines = wrap(text, metrics, size_pt, usable_width)
-    height = measure_height_emu(text, metrics, size_pt, box.w, line_height)
+    height = measure_height_emu(
+        text, metrics, size_pt, box.w, line_height, inset_x_emu=frame_inset_x(box)
+    )
     return height, len(lines)
+
+
+def _trailing_leading(size_pt: float, line_height: float) -> int:
+    """Интервал под последней строкой: его рамке держать не нужно."""
+    return max(0, round((line_height - LAST_LINE_HEIGHT) * size_pt * EMU_PER_POINT))
 
 
 def _words_fit(text: str, metrics: FontMetrics, size_pt: float, box: Box) -> bool:
@@ -74,7 +82,7 @@ def _words_fit(text: str, metrics: FontMetrics, size_pt: float, box: Box) -> boo
     «обнаруже / ния». По высоте такой текст «влезает», глазами — нет. Кегль,
     на котором слово шире строки, влезающим не считается.
     """
-    limit = max(1, box.w - FRAME_INSET_X_EMU) / MEASUREMENT_SLACK
+    limit = max(1, box.w - frame_inset_x(box)) / MEASUREMENT_SLACK
     return all(metrics.width_emu(word, size_pt) <= limit for word in text.split())
 
 
@@ -90,7 +98,7 @@ def capacity_lines(
     сократила каждую строку втрое, а переполнение осталось, потому что дело
     было в числе абзацев, а не в их длине.
     """
-    usable_height = max(1, box.h - FRAME_INSET_Y_EMU)
+    usable_height = max(1, box.h - frame_inset_y(box)) + _trailing_leading(size_pt, line_height)
     per_line = measure_height_emu("x", metrics, size_pt, box.w, line_height)
     return int(usable_height // per_line) if per_line else 0
 
@@ -112,12 +120,13 @@ def fit_size(
     Если не влезло нигде, возвращает минимальную ступень с `fits=False`:
     решение, что делать дальше, принимает вызывающий, а не фиттер.
     """
-    usable_height = max(1, box.h - FRAME_INSET_Y_EMU)
+    usable_height = max(1, box.h - frame_inset_y(box))
     steps = [size for size in ladder if size <= start_pt] or [min(ladder)]
 
     last_height, last_lines = 0, 0
     for steps_down, size in enumerate(reversed(steps)):
         height, lines = _height_emu(text, metrics, size, box, line_height)
+        height -= _trailing_leading(size, line_height)
         if height <= usable_height and _words_fit(text, metrics, size, box):
             return FitResult(
                 size_pt=size,
@@ -155,12 +164,12 @@ def fit_paragraphs(
     Разный кегль у соседних пунктов одного списка — не вёрстка, а авария,
     поэтому ступень ищется общая: та, на которой помещается вся сумма.
     """
-    usable_height = max(1, box.h - FRAME_INSET_Y_EMU)
+    usable_height = max(1, box.h - frame_inset_y(box))
     steps = [size for size in ladder if size <= start_pt] or [min(ladder)]
 
     last_height, last_lines = 0, 0
     for steps_down, size in enumerate(reversed(steps)):
-        total_height = 0
+        total_height = -_trailing_leading(size, line_height)
         total_lines = 0
         for line in lines:
             height, count = _height_emu(line, metrics, size, box, line_height)

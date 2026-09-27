@@ -349,3 +349,46 @@ def bookend_pattern(
         ),
     )
 
+
+def declares_titles(slides: list) -> bool:
+    """Объявлен ли где-нибудь в шаблоне плейсхолдер заголовка."""
+    return any(
+        _ph_type(sp) in _TITLE_TYPES
+        for slide in slides
+        for sp in slide.shapes._spTree.iter(f"{{{P_NS}}}sp")
+    )
+
+
+def _title_size(pattern: Pattern) -> float:
+    return max(
+        (
+            slot.style.size_pt
+            for slot in pattern.slots
+            if slot.role is SlotRole.TITLE and slot.style is not None
+        ),
+        default=0.0,
+    )
+
+
+def structural_bookends(patterns: list[Pattern]) -> tuple[Pattern | None, Pattern | None]:
+    """Обложка и финал шаблона без плейсхолдеров — по кеглю заголовка.
+
+    Объявить заголовок такому шаблону нечем: все надписи — обычные фигуры.
+    Обложка и финал выделяются тем, что набраны крупнее рабочего заголовка:
+    54 и 43.5 pt против 36 pt на всех внутренних слайдах. Рабочий заголовок —
+    самый частый кегль заголовков; обложка — первый слайд, финал — последний,
+    если их заголовок крупнее рабочего. Композиции те же, что сняты со
+    слайдов: у обложки маршрут из шести узлов, и он остаётся её частью.
+    """
+    titled = sorted(
+        (pattern for pattern in patterns if _title_size(pattern) > 0),
+        key=lambda pattern: pattern.donor_slide_index,
+    )
+    if len(titled) < 3:
+        return None, None
+    sizes = [_title_size(pattern) for pattern in titled]
+    working = max(set(sizes), key=sizes.count)
+    first, last = titled[0], titled[-1]
+    cover = first if _title_size(first) > working else None
+    closing = last if last is not first and _title_size(last) > working else None
+    return cover, closing

@@ -17,15 +17,24 @@ from __future__ import annotations
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from deckwright.audit import rewrite as rewrite_step
+from deckwright.audit.contextual.runner import SharedAudit
 from deckwright.config import Config
 from deckwright.content.ingest import IngestInput, ingest
 from deckwright.llm.base import StructuredClient
-from deckwright.pipeline import PipelineResult, apply_selection, run_variant
-from deckwright.schemas import ContentPack, DeckPurpose
+from deckwright.pipeline import (
+    LaidOut,
+    PipelineResult,
+    apply_selection,
+    complete_variant,
+    lay_out_variant,
+)
+from deckwright.schemas import ContentPack, DeckPurpose, FixKind
 
 
 @dataclass
@@ -110,9 +119,10 @@ def start(
 
     def work() -> None:
         # План и находки текстового прохода не зависят от варианта вёрстки:
-        # оба считаются один раз и переезжают дальше.
+        # оба считаются один раз. Раскладка — по очереди (вариант избегает
+        # композиций предыдущих), сборка и аудит — параллельно, как в CLI.
         prepared = None
-        text_findings = None
+        shared_audit = SharedAudit()
         try:
             # Разбор входа — внутри прогона и внутри его секундомера: бюджет
             # в пять минут считается на всю колоду, вместе с ним.
@@ -126,13 +136,14 @@ def start(
             state.pack = pack
             state.ingest_seconds = state.elapsed
             state.stage = "собираю варианты"
+            laid_out = []
             for name in variants:
                 variant_state = state.variants[name]
 
                 def on_stage(stage: str, target: VariantState = variant_state) -> None:
                     target.stage = stage
 
-                result = run_variant(
+                laid = lay_out_variant(
                     template_path=template_path,
                     pack=pack,
                     cfg=cfg,
@@ -143,13 +154,20 @@ def start(
                     vlm_client=vlm_client,
                     fix_mode=fix_mode,
                     prepared=prepared,
-                    text_findings=text_findings,
+                    text_findings=shared_audit,
                     on_stage=on_stage,
                 )
-                prepared = result.prepared
-                text_findings = result.text_findings
-                variant_state.result = result
+                prepared = laid.prepared
+                laid_out.append((variant_state, laid))
+
+            def complete(item: tuple[VariantState, LaidOut]) -> None:
+                variant_state, laid = item
+                variant_state.result = complete_variant(laid)
                 variant_state.stage = "готово"
+
+            with ThreadPoolExecutor(max_workers=len(laid_out)) as pool:
+                # `list` — чтобы исключение варианта дошло сюда, а не пропало.
+                list(pool.map(complete, laid_out))
         except Exception:  # поток не должен умирать молча: иначе страница ждёт вечно
             state.error = traceback.format_exc(limit=4)
             for variant_state in state.variants.values():
@@ -190,3 +208,14 @@ def apply(state: RunState, variant: str, client: StructuredClient | None = None)
             variant_state.applying = False
 
     threading.Thread(target=work, name=f"deckwright-fix-{variant}", daemon=True).start()
+
+
+def applicable(issue) -> bool:
+    """Умеет ли «Применить отмеченное» что-то сделать с этой находкой.
+
+    Автоматическая правка — да; переписывание текста моделью — да. Находка
+    «к сведению» (плотность, повтор, вопрос к человеку) исправления не имеет:
+    отмеченная, она не попадала в применяемое, и кнопка показывала «(0)» при
+    отмеченных пунктах.
+    """
+    return issue.fix.kind is FixKind.AUTOMATIC or bool(rewrite_step.rewritable([issue]))

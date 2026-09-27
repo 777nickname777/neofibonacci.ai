@@ -196,6 +196,72 @@ def contrast(
     return found
 
 
+# Контраст, при котором крупный текст читается (WCAG для крупного — 3:1).
+_READABLE_LARGE = 3.0
+# Насколько цвет может разойтись с цветом шаблона и считаться тем же.
+_SAME_COLOR = 40
+
+
+def _near(a: str, b: str) -> bool:
+    return sum(abs(x - y) for x, y in zip(_rgb(a), _rgb(b), strict=True)) <= _SAME_COLOR
+
+
+def text_on_fill(slide: SlideIR, spec: TemplateSpec) -> list[Issue]:
+    """Цвет текста не тот, которым шаблон пишет на этой заливке.
+
+    Контраст может проходить, а стиль — нет: шапка таблицы `vk_workspace`
+    писалась чёрным по синему, хотя шаблон пишет по синему белым. Мерится
+    текст на своей подложке (карточка, плашка) и шапка таблицы. Образец —
+    цвета шаблона на заливке ровно этого цвета, а если на ней он не писал,
+    — на заливках того же тона (тёмных или светлых). Без образца проверять
+    не с чем, и проверка молчит.
+    """
+    found: list[Issue] = []
+
+    def check(element, fill, colors) -> None:
+        expected = spec.colors_written_on(fill) or spec.colors_written_on_tone(
+            fill.luminance < 0.5
+        )
+        # Цвет шаблона, который на этой заливке не читается даже крупным
+        # (белый по салатовому `zelenie_investicii`, 2.2:1), вёрстка законно
+        # меняет на читаемый — это не нарушение стиля.
+        expected = [
+            color for color in expected if color.contrast_ratio(fill) >= _READABLE_LARGE
+        ]
+        if not expected:
+            return
+        # Образец — самый частый цвет и те, что шаблон пишет на тоне не реже
+        # трети от него: серый рядом с чёрным — тоже решение шаблона.
+        wrong = [
+            color
+            for color in colors
+            if not any(_near(color.rgb, sample.rgb) for sample in expected[:3])
+        ]
+        if wrong:
+            found.append(
+                _issue(
+                    "template.text_color_off_template",
+                    slide.index,
+                    f"{element.id}: текст #{wrong[0].rgb} на заливке #{fill.rgb}, "
+                    f"шаблон пишет на ней #{expected[0].rgb}",
+                    element_ids=[element.id],
+                    bbox=element.box,
+                )
+            )
+
+    for element in slide.all_elements():
+        table = element.table
+        if table is not None and table.header_fill is not None and table.header_style:
+            check(element, table.header_fill, [table.header_style.color])
+        if element.text is not None and element.backdrop is not None:
+            check(
+                element,
+                element.backdrop,
+                [paragraph.style.color for paragraph in element.text.paragraphs],
+            )
+    return found
+
+
 def layout_reference(slide: SlideIR, spec: TemplateSpec) -> list[Issue]:
     """Слайд обязан ссылаться на существующий layout шаблона."""
     if slide.layout_id is None:
@@ -266,6 +332,7 @@ def run(
         found.extend(fonts_and_sizes(slide, spec))
         found.extend(colors(slide, spec))
         found.extend(contrast(slide, min_contrast, spec))
+        found.extend(text_on_fill(slide, spec))
         found.extend(layout_reference(slide, spec))
         found.extend(recurring_elements(slide, spec))
     return found
@@ -278,4 +345,5 @@ __all__ = [
     "layout_reference",
     "recurring_elements",
     "run",
+    "text_on_fill",
 ]

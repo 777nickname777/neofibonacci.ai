@@ -176,3 +176,40 @@ def test_input_accepts_a_brief_and_files_of_any_format(monkeypatch):
     app.sidebar.text_area[0].input("Покажем фичу автопротокола руководителям.").run()
     sample = next(box for box in app.sidebar.checkbox if "демонстрационный" in box.label)
     assert sample.value is False
+
+
+# ── Что можно отметить к применению ─────────────────────────────────────────
+
+
+def test_only_fixable_findings_can_be_picked():
+    """Пункт без исправления отметить нельзя: кнопка показывала «(0)».
+
+    Применить можно автоматическую правку и переписывание текста моделью;
+    плотность, повтор и вопрос к человеку — только к сведению.
+    """
+    from app import runs
+
+    from deckwright.schemas import (
+        CheckKind,
+        FixKind,
+        Issue,
+        IssueCategory,
+        ProposedFix,
+        Severity,
+    )
+
+    def finding(kind: FixKind, action: str) -> Issue:
+        return Issue(
+            check_id="density.slide_too_empty",
+            kind=CheckKind.DETERMINISTIC,
+            category=IssueCategory.DENSITY,
+            severity=Severity.INFO,
+            slide_index=1,
+            message="слайд пустоват",
+            fix=ProposedFix(kind=kind, description="—", action=action),
+        )
+
+    assert not runs.applicable(finding(FixKind.NONE, ""))
+    assert not runs.applicable(finding(FixKind.ASSISTED, "review_contextual_finding"))
+    assert runs.applicable(finding(FixKind.AUTOMATIC, "move_inside_margins"))
+    assert runs.applicable(finding(FixKind.ASSISTED, "shorten_paragraph"))
