@@ -56,7 +56,7 @@ on:
         required: false
         default: "1"
       new_inputs:
-        description: "Четыре новых входа (бриф, docx, pdf, чужой JSON) на всех шаблонах: true — все, `вход:шаблон` — одна пара (brief:vk_tech)"
+        description: "Четыре новых входа (бриф, docx, pdf, чужой JSON) на всех шаблонах: true — все, `вход:шаблон[,вход:шаблон…]` — выбранные пары (brief:vk_tech,docx:zelenie_investicii)"
         required: false
         default: "false"
       template:
@@ -256,7 +256,7 @@ jobs:
             for TEMPLATE in data/templates/vk_tech.pptx data/templates/vk_workspace.pptx \
                             data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx; do
               NAME=$(basename "$TEMPLATE" .pptx)
-              if [ "$ONLY" != "true" ] && [ "$ONLY" != "$INPUT:$NAME" ]; then
+              if [ "$ONLY" != "true" ] && [[ ",$ONLY," != *",$INPUT:$NAME,"* ]]; then
                 continue
               fi
               OUT="probe-out/new/$INPUT/$NAME"
@@ -294,13 +294,30 @@ jobs:
                       for i in issues if i["severity"] == "error"
                   ],
               }
+          # Лог читается через get_job_logs, а он отдаёт не больше 5000 строк
+          # с конца. JSON с отступами — строка на поле, ~600 строк на пару, и
+          # полный прогон 4×4 обрезался наполовину. Здесь строка на элемент
+          # списка верхнего уровня (слайд, факт, ряд) — ~50 строк на пару.
+          def dump(value):
+              return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+          def compact(obj):
+              if not isinstance(obj, dict):
+                  return dump(obj)
+              parts = []
+              for key, value in obj.items():
+                  if isinstance(value, list) and value:
+                      body = ",\n".join(dump(item) for item in value)
+                      parts.append(f"{dump(key)}:[\n{body}\n]")
+                  else:
+                      parts.append(f"{dump(key)}:{dump(value)}")
+              return "{" + ",\n".join(parts) + "}"
           print("----- НАЧАЛО audit -----")
           print(json.dumps(summary, ensure_ascii=False))
           print("----- КОНЕЦ audit -----")
           for name in ("run-summary.json", "pack.json", "plan.json"):
               path = out / name
               print(f"----- НАЧАЛО {name} -----")
-              print(path.read_text(encoding="utf-8") if path.exists() else "(нет)")
+              print(compact(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else "(нет)")
               print(f"----- КОНЕЦ {name} -----")
           PY
             done
