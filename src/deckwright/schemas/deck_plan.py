@@ -152,6 +152,23 @@ class ContentBlock(BaseModel):
     image_prompt: str = ""
     table: TableData | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _text_is_an_item(cls, data):
+        """Текст блока в поле `text` — это его пункт.
+
+        Модель пишет абзац в `text`, а не в `items`: живой прогон «продажи ×
+        Дорожная карта» (сентябрь 2026) отбраковал из-за этого весь план, и
+        повтор стоил 43 с из бюджета. Поле переносится как есть — это ключ
+        JSON, а не разбор свободного текста.
+        """
+        if isinstance(data, dict) and isinstance(data.get("text"), str):
+            data = dict(data)
+            text = data.pop("text").strip()
+            if text and text not in data.get("items", []):
+                data["items"] = [*data.get("items", []), text]
+        return data
+
     @model_validator(mode="after")
     def _has_payload(self) -> ContentBlock:
         empty = (
@@ -190,6 +207,28 @@ class SlidePlan(BaseModel):
     speaker_notes: str = ""
     # Числа, вынесенные на слайд, с их происхождением.
     figures: list[Figure] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_empty_blocks(cls, data):
+        """Блок без содержания — `{"id": "b14", "kind": "paragraph"}` — отбрасывается.
+
+        Живой план на `vk_tech` отдал такие блоки на разделителе и финале, и
+        весь план ушёл на повтор: 42 с из бюджета за блок, верстать который
+        всё равно нечего. Слайд без блоков остаётся под проверкой ниже.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("blocks"), list):
+            return data
+        payload = ("items", "series_ids", "fact_ids", "quote_id", "image_prompt", "heading",
+                   "table", "text")
+        kept = [
+            block
+            for block in data["blocks"]
+            if not isinstance(block, dict) or any(block.get(key) for key in payload)
+        ]
+        if len(kept) == len(data["blocks"]):
+            return data
+        return {**data, "blocks": kept}
 
     @model_validator(mode="after")
     def _body_slides_have_content(self) -> SlidePlan:

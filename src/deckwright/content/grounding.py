@@ -87,6 +87,8 @@ _MULTIPLIERS: dict[str, float] = {
         "миллиардами", "миллиардах", "миллиардом", "млрд",
     ),
 }
+# Сокращённые множители: без числа перед ними это единица, а не число.
+_ABBREVIATED = frozenset({"тыс", "млн", "млрд", "трлн"})
 _WORD = re.compile(r"\d+(?:[.,]\d+)?|[а-яё]+|\S", re.IGNORECASE)
 
 
@@ -109,6 +111,11 @@ def word_numbers(text: str) -> set[float]:
             group += _UNITS[token]
             seen = True
         elif token in _MULTIPLIERS and after_digits and not seen:
+            continue
+        elif token in _ABBREVIATED and not seen:
+            # «млн» без числа — единица измерения («Выручка (млн руб.)»), а
+            # не миллион: иначе аудит находил на слайде «1e+06», которого во
+            # входе нет. Полное слово без числа («тысячи клиентов») — число.
             continue
         elif token in _MULTIPLIERS:
             total += (group or 1) * _MULTIPLIERS[token]

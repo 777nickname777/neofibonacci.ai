@@ -18,7 +18,7 @@ from deckwright.content.readers import UnsupportedInput
 from deckwright.environment import run_checks
 from deckwright.llm.base import StructuredClient
 from deckwright.llm.fake import RecordedClient
-from deckwright.pipeline import complete_variant, lay_out_variant, run_variant
+from deckwright.pipeline import complete_variant, lay_out_variant, run_variant, stage_times
 from deckwright.schemas import ContentPack, DeckPurpose, RunSummary
 
 DEFAULT_CONFIG = Path("configs/config.yaml")
@@ -245,11 +245,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         generation_seconds=round(total - parse_seconds, 3),
         total_seconds=round(total, 3),
         budget_seconds=cfg.run.time_budget_seconds,
+        stages=stage_times(pack_seconds, [result.manifest for result in results]),
     )
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "run-summary.json").write_text(
         summary.model_dump_json(indent=2), encoding="utf-8"
     )
+    print("[этапы] " + ", ".join(f"{name} {seconds}с" for name, seconds in summary.stages.items()))
     print(
         f"[прогон] разбор входа {summary.parse_seconds}с "
         f"(из них материалы {summary.ingest_seconds}с); "
@@ -667,6 +669,56 @@ def _cmd_audit_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit_dpi(args: argparse.Namespace) -> int:
+    """Картиночный аудит одних и тех же колод при разных разрешениях.
+
+    Колоды пересобираются по записанному плану: вёрстка детерминирована, и
+    это ровно те колоды, что собрал живой прогон. Живые — только вопросы по
+    картинкам. Итог — таблица токенов, времени и находок на каждое dpi.
+    """
+    from deckwright.audit import probe as audit_probe
+    from deckwright.llm.client import LiveClient
+
+    cfg = load_config(args.config)
+    model = cfg.vlm if cfg.vlm.configured else cfg.llm
+    if not model.configured:
+        print("Модель со зрением не настроена: VLM_* или LLM_* в .env.", file=sys.stderr)
+        return 1
+    dpis = [int(value) for value in args.dpi.split(",")]
+    client = LiveClient(model)
+    check_ids = cfg.audit.checks_by_mode("image")
+    pack = ContentPack.model_validate_json(Path(args.content).read_text(encoding="utf-8"))
+    reports = []
+    for variant in args.variants.split(","):
+        built = run_variant(
+            template_path=args.template,
+            pack=pack,
+            cfg=cfg,
+            client=RecordedClient(args.recorded),
+            variant=variant,
+            output_dir=Path(args.output) / Path(args.template).stem / variant,
+        )
+        passes = audit_probe.compare_resolutions(
+            client,
+            built.deck,
+            built.plan,
+            built.pages,
+            check_ids,
+            base_dpi=cfg.render.png_dpi,
+            dpis=dpis,
+            workers=cfg.vlm.max_concurrent_calls,
+        )
+        report = audit_probe.format_resolution_report(
+            f"{Path(args.template).stem} / {variant} ({len(built.pages)} слайдов)", passes
+        )
+        print(report, flush=True)
+        reports.append(report)
+    if args.save:
+        Path(args.save).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.save).write_text("\n\n".join(reports) + "\n", encoding="utf-8")
+    return 0
+
+
 def _cmd_rewrite_probe(args: argparse.Namespace) -> int:
     """Живой прогон главного сценария демонстрации.
 
@@ -935,6 +987,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     audit.add_argument("--save", default=None, help="Куда сохранить замеры в JSON.")
     audit.set_defaults(func=_cmd_audit_probe)
+
+    dpi = sub.add_parser(
+        "audit-dpi",
+        help="Картиночный аудит тех же колод при разных разрешениях: токены и находки.",
+    )
+    dpi.add_argument("--config", default=str(DEFAULT_CONFIG), help="Путь к config.yaml.")
+    dpi.add_argument("--template", required=True, help="Шаблон .pptx.")
+    dpi.add_argument("--content", required=True, help="Контент-пакет в JSON.")
+    dpi.add_argument("--recorded", required=True, help="Каталог с записанным plan_deck.json.")
+    dpi.add_argument("--variants", default="dense,balanced,airy", help="Варианты через запятую.")
+    dpi.add_argument("--dpi", default="96,72,60", help="Разрешения через запятую, первое — база.")
+    dpi.add_argument("--output", default="outputs/audit-dpi", help="Куда класть колоды.")
+    dpi.add_argument("--save", default=None, help="Куда сохранить таблицу (markdown).")
+    dpi.set_defaults(func=_cmd_audit_dpi)
 
     rewrite = sub.add_parser(
         "rewrite-probe",

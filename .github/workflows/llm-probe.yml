@@ -59,6 +59,10 @@ on:
         description: "Четыре новых входа (бриф, docx, pdf, чужой JSON) на всех шаблонах: true — все, `вход:шаблон[,вход:шаблон…]` — выбранные пары (brief:vk_tech,docx:zelenie_investicii)"
         required: false
         default: "false"
+      audit_dpi:
+        description: "Картиночный аудит записанных колод «продажи» при 96/72/60 dpi: токены и находки"
+        required: false
+        default: "false"
       template:
         description: "Шаблон: путь в репозитории или `synthetic` для собираемого на месте"
         required: false
@@ -155,7 +159,7 @@ jobs:
             --save probe-out/audit-probe.json
 
       - name: Диагностический вызов
-        if: ${{ inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' }}
+        if: ${{ inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' && inputs.audit_dpi != 'true' }}
         env:
           LLM_BASE_URL: ${{ inputs.base_url }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -192,7 +196,7 @@ jobs:
       # поэтому полученный план дублируется в лог: оттуда его можно взять как
       # настоящую фикстуру вместо рукописной.
       - name: Полученный план целиком
-        if: ${{ always() && inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' }}
+        if: ${{ always() && inputs.audit != 'true' && inputs.rewrite != 'true' && inputs.new_inputs == 'false' && inputs.audit_dpi != 'true' }}
         run: |
           if [ -f probe-out/plan_deck.json ]; then
             echo "----- НАЧАЛО plan_deck.json -----"
@@ -252,9 +256,11 @@ jobs:
             exit 1
           fi
           python tests/fixtures/make_inputs.py probe-inputs
-          for INPUT in brief docx pdf json; do
+          for INPUT in brief docx pdf json sales; do
             for TEMPLATE in data/templates/vk_tech.pptx data/templates/vk_workspace.pptx \
-                            data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx; do
+                            data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx \
+                            data/holdout/dorozhnaya_karta.pptx \
+                            data/holdout/podgotovka_k_ekzamenam.pptx; do
               NAME=$(basename "$TEMPLATE" .pptx)
               if [ "$ONLY" != "true" ] && [[ ",$ONLY," != *",$INPUT:$NAME,"* ]]; then
                 continue
@@ -278,7 +284,7 @@ jobs:
                 > "$OUT/run.log" 2>&1 || echo "прогон упал: код $?"
               # Поэтапное время вариантов и вызовы модели: без них не видно,
               # куда уходит бюджет (живой dense 145 с на любом шаблоне).
-              grep -E '^\[(вход|прогон|шаг)\]|^\[(dense|balanced|airy)\] (parse|разбор|модель|итерация)|ВНЕ|Traceback|Error' "$OUT/run.log" || true
+              grep -E '^\[(вход|прогон|шаг|этапы)\]|^\[(dense|balanced|airy)\] (parse|разбор|модель|итерация)|ВНЕ|Traceback|Error' "$OUT/run.log" || true
               python - "$OUT" <<'PY'
           import collections, glob, json, pathlib, sys
           out = pathlib.Path(sys.argv[1])
@@ -323,6 +329,26 @@ jobs:
               print(f"----- КОНЕЦ {name} -----")
           PY
             done
+          done
+
+      # Сравнение разрешений картинок аудита на уже собранных колодах: колоды
+      # пересобираются по записанному живому плану «продажи» (вёрстка
+      # детерминирована), живые — только вопросы по картинкам. База (96 dpi)
+      # спрашивается дважды: расхождение двух одинаковых проходов — шум модели.
+      - name: Аудит при разных разрешениях
+        if: ${{ inputs.audit_dpi == 'true' }}
+        env:
+          VLM_BASE_URL: ${{ inputs.base_url }}
+          VLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          VLM_MODEL: ${{ inputs.model }}
+        run: |
+          for TEMPLATE in data/holdout/dorozhnaya_karta.pptx data/holdout/podgotovka_k_ekzamenam.pptx; do
+            NAME=$(basename "$TEMPLATE" .pptx)
+            deckwright audit-dpi --template "$TEMPLATE" \
+              --content tests/fixtures/roadmap_sales/pack.json \
+              --recorded tests/fixtures/roadmap_sales/recorded \
+              --variants dense,balanced --dpi 96,72,60 \
+              --output probe-out/audit-dpi --save "probe-out/audit-dpi/$NAME.md" || echo "упал: $NAME"
           done
 
       - name: Результаты

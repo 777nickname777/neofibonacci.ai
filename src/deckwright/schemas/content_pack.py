@@ -44,6 +44,19 @@ class Fact(BaseModel):
     unit: str = ""
 
 
+class SeriesShape(StrEnum):
+    """Что ряд показывает — от этого зависит вид графика.
+
+    Помесячная выручка в сумме тоже даёт квартальную, но это динамика, а не
+    доли: отличить их по числам нельзя, а по смыслу — может модель, которая
+    читала вход. Пусто — неизвестно, вёрстка решает по числам.
+    """
+
+    TIME = "time"  # динамика: месяцы, кварталы, годы, этапы по порядку
+    PARTS = "parts"  # доли целого: каналы, сегменты, структура
+    COMPARE = "compare"  # сравнение независимых категорий: города, продукты
+
+
 class NumericPoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -62,6 +75,7 @@ class Series(BaseModel):
     points: list[NumericPoint] = Field(min_length=1)
     source_doc_id: str
     locator: str = ""
+    shape: SeriesShape | None = None
 
     @property
     def categories(self) -> list[str]:
@@ -174,6 +188,7 @@ class IngestSeries(BaseModel):
     doc_id: str
     locator: str = ""
     points: list[NumericPoint] = Field(min_length=2)
+    shape: SeriesShape | None = None
 
 
 class IngestQuote(BaseModel):

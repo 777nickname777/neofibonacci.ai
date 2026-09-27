@@ -179,6 +179,27 @@ def _to_issue(answer: Answer, slide_index: int, bbox: Box | None = None) -> Issu
     )
 
 
+def scaled_page(page: Path, scale: float) -> bytes:
+    """Картинка слайда для модели: PNG рендера, уменьшенный до `contextual_dpi`.
+
+    Токены картинки растут как её площадь, а лимит аккаунта — 40 000 токенов
+    в минуту на всё: аудит по картинкам упирается в него и занимает 80–111 с
+    прогона. Картинки для человека (`render.png_dpi`) при этом не трогаются.
+    """
+    data = page.read_bytes()
+    if scale >= 1.0:
+        return data
+    import io
+
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(data))
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    out = io.BytesIO()
+    image.convert("RGB").resize(size, Image.LANCZOS).save(out, "PNG", optimize=True)
+    return out.getvalue()
+
+
 def _image_pass(
     deck: DeckIR,
     plan: DeckPlan,
@@ -189,8 +210,9 @@ def _image_pass(
     prompts_dir: str | Path | None,
     only_slides: set[int] | None,
     shared: SharedAudit | None = None,
+    scale: float = 1.0,
 ) -> tuple[list[Issue], list[str]]:
-    prompt = load_prompt("audit_slide.v2", prompts_dir)
+    prompt = load_prompt("audit_slide.v3", prompts_dir)
     questions = _questions(check_ids)
     # Титул и разделитель по замыслу состоят из заголовка: вопрос «есть ли
     # на слайде содержание» для них ложный. Живой прогон 4×4: модель
@@ -204,6 +226,7 @@ def _image_pass(
             return [], f"слайд {slide.index}: картинки нет, вопрос не задан"
         planned = by_index.get(slide.index)
         text = prompt.template.format(
+            topic=plan.title,
             title=planned.takeaway_title if planned else "",
             intent=planned.intent.value if planned else "",
             body=_slide_body(slide),
@@ -213,7 +236,7 @@ def _image_pass(
                 else questions
             ),
         )
-        image = Path(page).read_bytes()
+        image = scaled_page(Path(page), scale)
 
         def call() -> SlideAnswers:
             return client.complete("audit_slide", text, SlideAnswers, images=[image])
@@ -356,6 +379,7 @@ def run(
             prompts_dir,
             only_slides,
             text_findings if isinstance(text_findings, SharedAudit) else None,
+            scale=min(1.0, audit.contextual_dpi / cfg.render.png_dpi),
         )
         result.issues.extend(issues)
         if problems:

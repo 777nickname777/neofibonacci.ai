@@ -241,11 +241,51 @@ def test_route_has_no_segments_to_removed_nodes(roadmap, tmp_path, variant):
         variant=variant,
         output_dir=tmp_path / variant,
     )
-    for index, slide in enumerate(Presentation(str(result.pptx)).slides, start=1):
+    pairs = zip(Presentation(str(result.pptx)).slides, result.deck.slides, strict=True)
+    for index, (slide, slide_ir) in enumerate(pairs, start=1):
         routes = sum(1 for shape in slide.shapes if "-route-" in shape.name)
         numbers = sum(
             1
             for shape in slide.shapes
             if shape.has_text_frame and shape.text_frame.text.strip().isdigit()
         )
-        assert routes <= max(0, numbers - 2), (index, routes, numbers)
+        # У обложки номера страницы нет: узлов столько, сколько номеров.
+        page = 0 if slide_ir.pattern_id in result.spec.bookend_ids else 1
+        assert routes <= max(0, numbers - page - 1), (index, routes, numbers)
+
+
+# ── Фон слайда-донора ────────────────────────────────────────────────────────
+
+
+def test_roadmap_slide_backgrounds_are_read_from_the_slide(roadmap):
+    """Фон задан на каждом слайде бланка (`p:bg`), у мастера — белый."""
+    assert all(p.background_signature for p in roadmap.patterns)
+    closing = next(p for p in roadmap.patterns if p.id == roadmap.closing_pattern_id)
+    # Финал тёмный фоном слайда, а не фигурой-подложкой.
+    assert closing.background is not None and closing.background.luminance < 0.5
+    assert closing.is_dark
+
+
+def _docx_deck(tmp_path: Path, variant: str):
+    source = FIXTURES / "roadmap_docx"
+    return run_variant(
+        template_path=ROADMAP,
+        pack=ContentPack.model_validate(json.loads((source / "pack.json").read_text("utf-8"))),
+        cfg=load_config(CONFIG),
+        client=RecordedClient(source / "recorded"),
+        variant=variant,
+        output_dir=tmp_path / variant,
+    )
+
+
+def test_deck_slides_carry_their_donor_background(roadmap, tmp_path):
+    """Каждый слайд колоды несёт фон своего донора, и аудит молчит."""
+    from deckwright.parse.tokens import background_signature, own_background
+
+    result = _docx_deck(tmp_path, "dense")
+    patterns = {p.id: p for p in roadmap.patterns}
+    pairs = zip(Presentation(str(result.pptx)).slides, result.deck.slides, strict=True)
+    for slide, slide_ir in pairs:
+        expected = patterns[slide_ir.pattern_id].background_signature
+        assert background_signature(own_background(slide._element), slide.part) == expected
+    assert not [i for i in result.audit.issues if i.check_id == "template.background_off_donor"]

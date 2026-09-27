@@ -558,6 +558,41 @@ def _finish(
     )
 
 
+# Этапы прогона в том виде, в каком их видит человек, — в этом порядке.
+STAGE_TEMPLATE = "разбор шаблона"
+STAGE_INGEST = "разбор входа"
+STAGE_PLAN = "план"
+STAGE_GENERATE = "генерация вариантов"
+STAGE_AUDIT = "аудит"
+STAGES = (STAGE_TEMPLATE, STAGE_INGEST, STAGE_PLAN, STAGE_GENERATE, STAGE_AUDIT)
+
+
+def stage_times(ingest_seconds: float, manifests: list[RunManifest]) -> dict[str, float]:
+    """Время прогона по этапам — чтобы было видно, где теряется бюджет.
+
+    Разбор шаблона, план и раскладка идут по очереди (сумма по вариантам:
+    шаблон разбирает первый, остальные берут кэш; план считает первый).
+    Сборка, аудит и цикл исправления идут параллельно — у них самый долгий
+    вариант. Генерация — раскладка и сборка (`.pptx`, `.pdf`, PNG, HTML),
+    аудит — детерминированные проверки и вызовы модели по картинкам вместе с
+    повторным аудитом после исправлений.
+    """
+    def total(manifest: RunManifest, *names: str) -> float:
+        return sum(t.seconds for t in manifest.timings if t.stage.startswith(names))
+
+    if not manifests:
+        return {STAGE_INGEST: round(ingest_seconds, 1)}
+    layout = sum(total(m, "layout") for m in manifests)
+    build = max(total(m, "render_", "verify_package") for m in manifests)
+    return {
+        STAGE_TEMPLATE: round(sum(total(m, "parse") for m in manifests), 1),
+        STAGE_INGEST: round(ingest_seconds, 1),
+        STAGE_PLAN: round(sum(total(m, "plan") for m in manifests), 1),
+        STAGE_GENERATE: round(layout + build, 1),
+        STAGE_AUDIT: round(max(total(m, "audit") for m in manifests), 1),
+    }
+
+
 @dataclass
 class LaidOut:
     """Вариант после раскладки: всё, что нужно сборке, рендеру и аудиту.
@@ -713,6 +748,7 @@ def lay_out_variant(
                 max_words_per_bullet=cfg.audit.max_words_per_bullet,
                 substitution_slack=cfg.fonts.substitution_slack,
                 block_limits=plan_limits(spec, cfg),
+                min_slides=cfg.deck.slide_count or cfg.deck.min_slides,
             )
             prepared = PreparedPlan(plan=plan, prompt=prompt, budget=budget)
     if budget is not None:

@@ -1,0 +1,528 @@
+{
+ "title": "Итоги продаж сети «Северный кофе» за III квартал 2026 года",
+ "subtitle": "Отчет для руководства",
+ "purpose": "project",
+ "language": "ru",
+ "slides": [
+  {
+   "index": 1,
+   "intent": "title",
+   "takeaway_title": "Итоги продаж сети «Северный кофе» за III квартал 2026 года",
+   "subtitle": "Презентация для руководства",
+   "blocks": [],
+   "speaker_notes": "",
+   "figures": []
+  },
+  {
+   "index": 2,
+   "intent": "agenda",
+   "takeaway_title": "Повестка: результаты III квартала и план на IV квартал",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b1",
+     "kind": "bullets",
+     "items": [
+      "Общая финансовая динамика",
+      "Анализ каналов продаж",
+      "География и выполнение плана",
+      "Ключевые драйверы роста",
+      "План действий на IV квартал"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": []
+  },
+  {
+   "index": 3,
+   "intent": "evidence",
+   "takeaway_title": "Выручка выросла на 12% и достигла 47,3 млн руб.",
+   "subtitle": "Рост обеспечен увеличением трафика",
+   "blocks": [
+    {
+     "id": "b2",
+     "kind": "series",
+     "items": [],
+     "series_ids": [
+      "s1"
+     ],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b3",
+     "kind": "kpi",
+     "items": [
+      "47,3 млн руб.",
+      "12%",
+      "134 150 чеков"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b4",
+     "kind": "paragraph",
+     "items": [
+      "Рост выручки обеспечен увеличением трафика"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "47,3 млн руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "f1"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "12%",
+     "kind": "cited",
+     "fact_ids": [
+      "f2"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "134 150 чеков",
+     "kind": "cited",
+     "fact_ids": [
+      "f3"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 4,
+   "intent": "evidence",
+   "takeaway_title": "Сентябрь стал главным драйвером роста благодаря сезонному меню",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b5",
+     "kind": "series",
+     "items": [],
+     "series_ids": [
+      "s1",
+      "s2",
+      "s3"
+     ],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b6",
+     "kind": "quote",
+     "items": [
+      "«Сентябрь показал, что гости возвращаются, если меню меняется вместе с сезоном»",
+      "— Анна Лебедева, операционный директор сети"
+     ],
+     "series_ids": [],
+     "quote_id": "q1",
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "18,0 млн руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "f8"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 5,
+   "intent": "evidence",
+   "takeaway_title": "Средний чек стабильно растет: с 343 до 362 руб.",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b7",
+     "kind": "series",
+     "items": [],
+     "series_ids": [
+      "s3"
+     ],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b8",
+     "kind": "bullets",
+     "items": [
+      "Июль: 343 руб.",
+      "Август: 351 руб.",
+      "Сентябрь: 362 руб."
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "343 руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "s3"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "362 руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "s3"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 6,
+   "intent": "evidence",
+   "takeaway_title": "Продажи в зале остаются основой, но доставка растет на 41%",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b9",
+     "kind": "series",
+     "items": [],
+     "series_ids": [
+      "s4"
+     ],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b10",
+     "kind": "paragraph",
+     "items": [
+      "Доставка выросла на 41% к прошлому кварталу"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "41%",
+     "kind": "cited",
+     "fact_ids": [
+      "f14"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "30,7 млн руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "f10"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "8,5 млн руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "f11"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 7,
+   "intent": "evidence",
+   "takeaway_title": "Предзаказ в приложении впервые обогнал корпоративные заказы",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b11",
+     "kind": "bullets",
+     "items": [
+      "Предзаказ: 4,7 млн руб. (10%)",
+      "Корпоративные: 3,4 млн руб. (7%)",
+      "В зале: 30,7 млн руб. (65%)"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b12",
+     "kind": "paragraph",
+     "items": [
+      "Предзаказ в приложении впервые обогнал корпоративные заказы"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "4,7 млн руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "f12"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "3,4 млн руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "f13"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "10%",
+     "kind": "cited",
+     "fact_ids": [
+      "f12"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "7%",
+     "kind": "cited",
+     "fact_ids": [
+      "f13"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 8,
+   "intent": "evidence",
+   "takeaway_title": "Санкт-Петербург и Петрозаводск выполнили план на 112% и 104%",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b13",
+     "kind": "table",
+     "items": [],
+     "series_ids": [],
+     "quote_id": null,
+     "table": {
+      "columns": [
+       "Город",
+       "Выручка (млн руб.)",
+       "Выполнение плана"
+      ],
+      "rows": [
+       [
+        "Санкт-Петербург",
+        "26,6",
+        "112%"
+       ],
+       [
+        "Петрозаводск",
+        "9,8",
+        "104%"
+       ],
+       [
+        "Архангельск",
+        "4,7",
+        "98%"
+       ],
+       [
+        "Мурманск",
+        "6,2",
+        "87%"
+       ]
+      ]
+     }
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "26,6",
+     "kind": "cited",
+     "fact_ids": [
+      "f16"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "112%",
+     "kind": "cited",
+     "fact_ids": [
+      "f16"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "9,8",
+     "kind": "cited",
+     "fact_ids": [
+      "f17"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "104%",
+     "kind": "cited",
+     "fact_ids": [
+      "f17"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "4,7",
+     "kind": "cited",
+     "fact_ids": [
+      "f18"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "98%",
+     "kind": "cited",
+     "fact_ids": [
+      "f18"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "6,2",
+     "kind": "cited",
+     "fact_ids": [
+      "f19"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "87%",
+     "kind": "cited",
+     "fact_ids": [
+      "f19"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 9,
+   "intent": "evidence",
+   "takeaway_title": "Мурманск отстал от плана на 13%, требует внимания",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b14",
+     "kind": "kpi",
+     "items": [
+      "6,2 млн руб.",
+      "87% плана"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b15",
+     "kind": "paragraph",
+     "items": [
+      "Необходимо проанализировать причины отставания в Мурманске"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "6,2 млн руб.",
+     "kind": "cited",
+     "fact_ids": [
+      "f19"
+     ],
+     "formula": ""
+    },
+    {
+     "text": "87%",
+     "kind": "cited",
+     "fact_ids": [
+      "f19"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 10,
+   "intent": "roadmap",
+   "takeaway_title": "В IV квартале запускаем программу лояльности в приложении",
+   "subtitle": "",
+   "blocks": [
+    {
+     "id": "b16",
+     "kind": "steps",
+     "items": [
+      "Запуск программы лояльности",
+      "Продвижение через приложение",
+      "Анализ оттока в Мурманске"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    },
+    {
+     "id": "b17",
+     "kind": "paragraph",
+     "items": [
+      "Цель: удержание клиентов и рост среднего чека"
+     ],
+     "series_ids": [],
+     "quote_id": null,
+     "table": null
+    }
+   ],
+   "speaker_notes": "",
+   "figures": [
+    {
+     "text": "IV квартал",
+     "kind": "cited",
+     "fact_ids": [
+      "f20"
+     ],
+     "formula": ""
+    }
+   ]
+  },
+  {
+   "index": 11,
+   "intent": "closing",
+   "takeaway_title": "Спасибо за внимание",
+   "subtitle": "Готовы ответить на вопросы",
+   "blocks": [],
+   "speaker_notes": "",
+   "figures": []
+  }
+ ]
+}

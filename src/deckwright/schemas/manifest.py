@@ -136,6 +136,11 @@ class RunSummary(BaseModel):
     total_seconds: float = Field(ge=0)
     # Бюджет на всю колоду: разбор входа и генерация всех вариантов.
     budget_seconds: int = Field(gt=0)
+    # Время по этапам, по часам: разбор шаблона, разбор входа, план,
+    # генерация вариантов, аудит (`pipeline.stage_times`). Варианты
+    # собираются и проверяются параллельно — у этих этапов берётся самый
+    # долгий вариант, а не сумма.
+    stages: dict[str, float] = Field(default_factory=dict)
 
     @property
     def within_budget(self) -> bool:

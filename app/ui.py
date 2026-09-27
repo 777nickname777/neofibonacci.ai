@@ -248,10 +248,25 @@ def _progress(state: runs.RunState, cfg) -> None:
     columns = st.columns(total or 1)
     for column, variant_state in zip(columns, state.variants.values(), strict=False):
         column.metric(variant_state.name, variant_state.stage)
+    _stage_times(state)
     if state.elapsed > cfg.run.time_budget_seconds:
         st.warning(
             f"прогон идёт {state.elapsed} с при бюджете {cfg.run.time_budget_seconds} с"
         )
+
+
+def _stage_times(state: runs.RunState) -> None:
+    """Время по этапам: разбор шаблона, разбор входа, план, генерация, аудит.
+
+    Сумма этапов меньше общего времени: варианты собираются и проверяются
+    параллельно, и у этих этапов показан самый долгий вариант.
+    """
+    stages = state.stages()
+    if not stages:
+        return
+    columns = st.columns(len(stages))
+    for column, (name, seconds) in zip(columns, stages.items(), strict=True):
+        column.metric(name, f"{seconds:.1f} с")
 
 
 def _pick_key(state: runs.RunState, variant: str, issue_key: str, number: int) -> str:

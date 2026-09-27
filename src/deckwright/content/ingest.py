@@ -99,7 +99,7 @@ def ingest(
         raise IngestError("для разбора входа нужна модель, а клиент не задан")
 
     documents, warnings = render_documents(sources, max_chars)
-    prompt = load_prompt("ingest_content.v1", prompts_dir)
+    prompt = load_prompt("ingest_content.v2", prompts_dir)
     purpose = request.purpose.value if request.purpose else "не выбрано"
     answer = client.complete(
         step=prompt.step,
@@ -245,6 +245,7 @@ def to_pack(
                 points=item.points,
                 source_doc_id=doc(item.doc_id),
                 locator=item.locator,
+                shape=item.shape,
             )
         )
 

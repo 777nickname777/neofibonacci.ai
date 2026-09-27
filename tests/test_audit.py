@@ -1148,3 +1148,115 @@ def test_table_header_is_written_as_the_template_writes_on_its_fill(
     element.table = element.table.model_copy(update={"header_style": black})
     found = text_on_fill(slide, result.spec)
     assert [issue.check_id for issue in found] == ["template.text_color_off_template"]
+
+
+def test_background_unlike_the_donor_is_a_finding(tmp_path):
+    """`"template.background_off_donor"`: фон задан на слайде шаблона, а в
+    колоде его нет — слайд белый на белом мастере."""
+    from pptx import Presentation as Open
+
+    from deckwright.audit.deterministic.content import donor_background
+    from deckwright.parse.tokens import own_background
+
+    template = Path("data/holdout/dorozhnaya_karta.pptx")
+    if not template.exists():
+        pytest.skip("нет бланка «Дорожная карта»")
+    source = Path(__file__).parent / "fixtures" / "roadmap_docx"
+    result = run_variant(
+        template_path=template,
+        pack=ContentPack.model_validate(json.loads((source / "pack.json").read_text("utf-8"))),
+        cfg=load_config(CONFIG),
+        client=RecordedClient(source / "recorded"),
+        variant="dense",
+        output_dir=tmp_path / "deck",
+    )
+    assert donor_background(result.pptx, result.deck, result.spec) == []
+
+    presentation = Open(str(result.pptx))
+    bg = own_background(presentation.slides[2]._element)
+    bg.getparent().remove(bg)
+    spoiled = tmp_path / "spoiled.pptx"
+    presentation.save(spoiled)
+    found = donor_background(spoiled, result.deck, result.spec)
+    assert [(i.check_id, i.slide_index) for i in found] == [
+        ("template.background_off_donor", 3)
+    ]
+
+
+def test_donor_photo_left_is_a_finding(clean, tmp_path):
+    """`"integrity.donor_photo_left"`: фото на слайде — всегда фото донора."""
+    import io
+    import random
+
+    from PIL import Image
+    from pptx import Presentation as Open
+    from pptx.util import Emu
+
+    from deckwright.audit.deterministic.content import donor_photos
+
+    assert donor_photos(clean.pptx, clean.deck) == []
+    rng = random.Random(7)
+    small = Image.new("RGB", (24, 16))
+    small.putdata([tuple(rng.randrange(40, 230) for _ in range(3)) for _ in range(24 * 16)])
+    photo = small.resize((600, 400), Image.BICUBIC)
+    blob = io.BytesIO()
+    photo.save(blob, "JPEG")
+    presentation = Open(str(clean.pptx))
+    inch = 914400
+    presentation.slides[1].shapes.add_picture(
+        io.BytesIO(blob.getvalue()), Emu(inch), Emu(inch), Emu(4 * inch), Emu(3 * inch)
+    )
+    spoiled = tmp_path / "photo.pptx"
+    presentation.save(spoiled)
+    found = donor_photos(spoiled, clean.deck)
+    assert [(i.check_id, i.slide_index) for i in found] == [("integrity.donor_photo_left", 2)]
+
+
+def test_audit_image_is_scaled_to_contextual_dpi(clean):
+    """Модель получает картинку при `audit.contextual_dpi`, а не при dpi рендера."""
+    import io
+
+    from PIL import Image
+
+    from deckwright.audit.contextual.runner import scaled_page
+
+    page = clean.pages[0]
+    full = Image.open(page)
+    small = Image.open(io.BytesIO(scaled_page(page, 0.625)))
+    assert small.width == round(full.width * 0.625)
+    assert scaled_page(page, 1.0) == page.read_bytes()
+
+
+def test_resolution_comparison_counts_lost_and_new_findings(clean):
+    """Сравнение разрешений: база дважды, находки меньших dpi сверяются с первой."""
+    import io
+
+    from PIL import Image
+
+    from deckwright.audit.probe import compare_resolutions, format_resolution_report
+
+    full = Image.open(clean.pages[0]).width
+
+    class Stub:
+        mocked = True
+        prompt_tokens = 0
+
+        def complete(self, step, prompt, schema, images=None):
+            width = Image.open(io.BytesIO(images[0])).width
+            self.prompt_tokens += width
+            # Мелкая картинка «теряет» находку — ровно то, что ищет сравнение.
+            return schema.model_validate(
+                {"answers": [{"check_id": "content.has_content", "passed": width < 0.8 * full}]}
+            )
+
+    cfg = load_config(CONFIG)
+    passes = compare_resolutions(
+        Stub(), clean.deck, clean.plan, clean.pages[:2],
+        ["content.has_content"], base_dpi=96, dpis=[96, 60], workers=1,
+    )
+    assert [(p.dpi, p.repeat) for p in passes] == [(96, 1), (96, 2), (60, 1)]
+    assert passes[0].findings == passes[1].findings and passes[0].findings
+    assert not passes[2].findings
+    report = format_resolution_report("clean", passes)
+    assert "нет 1:content.has_content" in report
+    assert cfg.audit.contextual_dpi

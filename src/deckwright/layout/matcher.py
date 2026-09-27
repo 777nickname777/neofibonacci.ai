@@ -19,10 +19,12 @@
 from __future__ import annotations
 
 import colorsys
+from collections import Counter
 
 from deckwright.layout.fitter import FitResult, fit_paragraphs, fit_size, split_blocks
 from deckwright.layout.strategy import Strategy, ladder_for_role, role_typical, scale_ladder
 from deckwright.layout.text_metrics import FontMetrics, metrics_for_spec
+from deckwright.plan.figures import parse_number
 from deckwright.schemas import (
     Align,
     BlockKind,
@@ -31,6 +33,7 @@ from deckwright.schemas import (
     ChartKind,
     CheckKind,
     Color,
+    ContentBlock,
     DeckIR,
     Element,
     ElementKind,
@@ -40,8 +43,10 @@ from deckwright.schemas import (
     LayoutSpec,
     Paragraph,
     Pattern,
+    PatternClass,
     ProposedFix,
     Provenance,
+    SeriesShape,
     Severity,
     SlideIntent,
     SlideIR,
@@ -49,6 +54,7 @@ from deckwright.schemas import (
     SlotRole,
     SourceKind,
     TableContent,
+    TableData,
     TemplateSpec,
     TextContent,
     TextStyle,
@@ -57,7 +63,7 @@ from deckwright.schemas import (
     required_contrast,
 )
 from deckwright.schemas.common import LARGE_TEXT_PT
-from deckwright.visuals.charts import series_from_pack, series_unit
+from deckwright.visuals.charts import format_value, series_from_pack, series_unit
 
 # Намерения, которым хватает одного заголовка.
 _BARE_INTENTS = frozenset({SlideIntent.TITLE, SlideIntent.SECTION, SlideIntent.CLOSING})
@@ -334,7 +340,23 @@ def _unsuitable(
                     filled.setdefault(repeater.id, set()).add(index)
         if block.kind in _SPREAD_KINDS and len(block.items) > 1 and len(seats) == 1:
             cramped.append(seats[0][0])
+            # Весь список в одном элементе повторителя — карточке «01», — а
+            # остальные элементы пусты: пункты могли получить каждый свою.
+            # Место к этому времени выросло на всю карточку (`_absorb`) и
+            # размером с соседними не совпадает — поэтому по элементу.
+            member = _member_prefix(pattern, seats[0][0].id)
+            if member is not None:
+                repeater_head = member.rsplit("_", 2)[0] + "_"
+                if any(
+                    slot.id.startswith(repeater_head) and not slot.id.startswith(member)
+                    for slot in free
+                ):
+                    return True
         if any(_on_picture(slot, pattern, len(lines)) for slot, lines in seats):
+            return True
+        if len(seats) > 1 and not pattern.is_dark and any(
+            _on_badge(slot, lines) for slot, lines in seats
+        ):
             return True
         taken.extend(slot.box for slot, _ in seats)
     # Список в одном месте, а такое же место рядом осталось пустым: пункты
@@ -362,6 +384,95 @@ def _on_picture(slot, pattern: Pattern, lines: int) -> bool:
     return lines > donor_lines and any(
         other.role is SlotRole.IMAGE and other.box.contains(slot.box)
         for other in pattern.slots
+    )
+
+
+# Сколько раз композиция берётся, прежде чем уступить ещё не взятой.
+_MAX_REPEATS = 2
+
+# Фото «сбоку»: не ниже этой доли высоты слайда и не шире этой доли ширины.
+_SIDE_PHOTO_HEIGHT = 0.6
+_SIDE_PHOTO_WIDTH = 0.5
+
+
+def _side_photos(pattern: Pattern, spec: TemplateSpec) -> list[Box]:
+    return [
+        photo
+        for photo in pattern.photo_slots
+        if photo.h >= spec.slide_height_emu * _SIDE_PHOTO_HEIGHT
+        and photo.w <= spec.slide_width_emu * _SIDE_PHOTO_WIDTH
+    ]
+
+
+def _photo_left_empty(pattern: Pattern, spec: TemplateSpec, has_data: bool) -> bool:
+    """Останется ли на месте убранного фото донора пустота.
+
+    Фото сбоку отдаёт место тексту (`_without_photos`), фото любой формы —
+    графику или таблице слайда. Иначе — баннер над карточками без данных —
+    место фото остаётся пустым, и такую композицию берут последней.
+    """
+    if not pattern.photo_slots or has_data:
+        return False
+    return len(_side_photos(pattern, spec)) < len(pattern.photo_slots)
+
+
+def _without_photos(pattern: Pattern, spec: TemplateSpec) -> Pattern:
+    """Композиция, перестроенная без фото донора: текст занимает место фото.
+
+    Фото сбоку («студент за компьютером» слева, текст справа) убирается
+    рендером, а заголовок и текст рядом с ним растягиваются на его место в
+    полях шаблона. Без этого половина слайда оставалась пустой.
+    """
+    side = _side_photos(pattern, spec)
+    if not side:
+        return pattern
+    grid = spec.grid
+    left = grid.margin_left_emu if grid else spec.slide_width_emu // 20
+    right = spec.slide_width_emu - (grid.margin_right_emu if grid else spec.slide_width_emu // 20)
+    grown = []
+    for slot in pattern.slots:
+        box = slot.box
+        if slot.role in _TEXT_GROWS_OVER_PHOTO:
+            for photo in side:
+                overlap = min(box.bottom, photo.bottom) - max(box.y, photo.y)
+                if overlap < box.h // 2:
+                    continue
+                if photo.right <= box.x:
+                    new_x = max(left, photo.x)
+                    box = box.model_copy(update={"x": new_x, "w": box.right - new_x})
+                elif photo.x >= box.right:
+                    new_right = min(right, photo.right)
+                    box = box.model_copy(update={"w": new_right - box.x})
+        grown.append(slot.model_copy(update={"box": box}) if box is not slot.box else slot)
+    photo_ids = {
+        slot.id
+        for slot in pattern.slots
+        if slot.role is SlotRole.IMAGE and any(slot.box == photo for photo in side)
+    }
+    return pattern.model_copy(
+        update={"slots": [slot for slot in grown if slot.id not in photo_ids]}
+    )
+
+
+# Роли, чья рамка растягивается на место убранного бокового фото.
+_TEXT_GROWS_OVER_PHOTO = frozenset(
+    {SlotRole.TITLE, SlotRole.SUBTITLE, SlotRole.BODY, SlotRole.BULLETS}
+)
+
+
+def _on_badge(slot, lines: list[str]) -> bool:
+    """Пункт списка в тёмной однострочной плашке на светлом слайде.
+
+    Шапка календаря «Период 1…4» и шапка таблицы — тёмные ячейки в строку
+    под короткую подпись. Три пункта плана ложились в них по ячейке мелким
+    белым текстом: плашка — место подписи, а не мысли.
+    """
+    backdrop = slot.backdrop
+    if backdrop is None or backdrop.luminance >= 0.5:
+        return False
+    donor = slot.placeholder_text.strip()
+    return len(donor.splitlines()) <= 1 and sum(len(line) for line in lines) > 2 * max(
+        1, len(donor)
     )
 
 
@@ -549,8 +660,13 @@ def pick_pattern(
             block.kind in (BlockKind.SERIES, BlockKind.KPI, BlockKind.TABLE)
             for block in plan_slide.blocks
         )
+        # График или таблица займут место убранного фото донора; показатель —
+        # нет, он садится в своё место.
+        has_series = any(
+            block.kind in (BlockKind.SERIES, BlockKind.TABLE) for block in plan_slide.blocks
+        )
 
-        def key(pattern: Pattern) -> tuple[bool, bool, bool, bool, bool, int, bool, int]:
+        def key(pattern: Pattern) -> tuple:
             # `avoid` — композиции, которые для этого слайда уже взяли другие
             # варианты. Варианты строятся независимо, и там, где влезающих
             # композиций мало, два из них брали одну и ту же: на `vk_tech`
@@ -560,6 +676,12 @@ def pick_pattern(
             # `vk_tech` три пункта ложились в пять пронумерованных карточек.
             return (
                 unsuitable(pattern),
+                # Фото донора — его тема, а не наша: студент за компьютером
+                # доезжал до колоды о продажах кофеен на семь слайдов из
+                # одиннадцати. Композиция без фото — раньше разнообразия; с
+                # фото — только если без него никак, и тогда рендер фото
+                # уберёт, а его место достанется графику или таблице.
+                _photo_left_empty(pattern, spec, has_series),
                 # Композиция с картинками-показателями донора (кольца «10%») —
                 # макет под данные: слайду без данных картинки уйдут, и он
                 # останется с тремя строками посреди пустоты.
@@ -569,7 +691,9 @@ def pick_pattern(
                 # с подписью — не показатель.
                 _figure_unsplit(pattern, spec, plan_slide, strategy),
                 pattern.id in avoid,
-                pattern.id in used,
+                # Сколько раз колода уже брала её — меньше лучше, а не только
+                # «брала или нет»: иначе при всех взятых выигрывала первая.
+                used[pattern.id] if isinstance(used, Counter) else pattern.id in used,
                 _spare_cards(pattern, spec, plan_slide, strategy),
                 strict_ids is not None and pattern.id not in strict_ids,
                 order.get(pattern.pattern_class, len(order)),
@@ -619,6 +743,10 @@ def pick_pattern(
     # `best_of` — после разнообразия.
     strict_ids = {pattern.id for pattern in matches}
     pool = matches + [pattern for pattern in relaxed if pattern.id not in strict_ids]
+    repeats = used if isinstance(used, Counter) else Counter(used)
+    has_series = any(
+        block.kind in (BlockKind.SERIES, BlockKind.TABLE) for block in plan_slide.blocks
+    )
     for tier in (typical, None):
         for spread in (True, False):
             roomy = fitting(
@@ -629,8 +757,27 @@ def pick_pattern(
                 ],
                 (tier,),
             )
-            if roomy:
-                return best_of(roomy, strict_ids)
+            if not roomy:
+                continue
+            best = best_of(roomy, strict_ids)
+            if repeats[best.id] >= _MAX_REPEATS:
+                # Список по карточкам — лучше списка в одной рамке, но не
+                # ценой колоды из одинаковых слайдов: на шаблоне, где без фото
+                # одна композиция с карточками, она брала восемь слайдов из
+                # четырнадцати. Третий раз подряд уступает той, что колода
+                # брала реже, если текст там читается тем же кеглем.
+                fresh = fitting(
+                    [
+                        pattern
+                        for pattern in suitable(pool)
+                        if repeats[pattern.id] < repeats[best.id]
+                        and not _photo_left_empty(pattern, spec, has_series)
+                    ],
+                    (tier,),
+                )
+                if fresh:
+                    return best_of(fresh, strict_ids)
+            return best
     if matches and fitting(matches):
         return best_of(matches)
     roomy = fitting(relaxed)
@@ -1564,6 +1711,7 @@ def _data_element(
     is_dark: bool,
     roomy: Box,
     plan_slide: SlidePlan | None = None,
+    title: str = "",
 ) -> Element | None:
     """Блок плана как нативный график или таблица, если это возможно.
 
@@ -1598,6 +1746,8 @@ def _data_element(
                 box, categories, series[0].values, unit, label.size_pt, spec
             )
             label = label.model_copy(update={"size_pt": size})
+            kind = _chart_kind(block.series_ids, categories, unit, pack)
+            parts = kind is ChartKind.DOUGHNUT
             return Element(
                 id=element_id,
                 kind=ElementKind.CHART,
@@ -1605,15 +1755,26 @@ def _data_element(
                 box=box,
                 provenance=Provenance(kind=SourceKind.DERIVED, ref=block.id),
                 chart=ChartContent(
-                    chart_kind=ChartKind.COLUMN if len(categories) > 2 else ChartKind.BAR,
+                    chart_kind=kind,
                     categories=categories,
                     series=series,
-                    has_legend=len(series) > 1,
+                    has_legend=len(series) > 1 or parts,
                     unit=unit,
                     label_style=label,
-                    highlight=_key_points(series[0].values, plan_slide, pack) if single else [],
-                    muted_color=_muted(series[0].color, background, is_dark) if single else None,
+                    highlight=(
+                        _key_points(series[0].values, plan_slide, pack)
+                        if single and not parts
+                        else []
+                    ),
+                    muted_color=(
+                        _muted(series[0].color, background, is_dark)
+                        if single and not parts
+                        else None
+                    ),
                     show_values=single,
+                    title=title,
+                    point_colors=brand if parts else [],
+                    language=pack.brief.language,
                 ),
             )
 
@@ -1778,6 +1939,25 @@ def _value_label(
     return ladder[-1], ""
 
 
+def _above_service(area: Box, pattern: Pattern | None, spec: TemplateSpec) -> Box:
+    """Область, кончающаяся над номером страницы и колонтитулом композиции.
+
+    График, выросший на свободное место, ложился на номер страницы бланка, и
+    уборка под графиком номер снимала.
+    """
+    if pattern is None:
+        return area
+    tops = [
+        slot.box.y
+        for slot in pattern.slots
+        if slot.role in (SlotRole.SLIDE_NUMBER, SlotRole.FOOTER) and slot.box.y > area.y
+    ]
+    if not tops:
+        return area
+    bottom = min(area.bottom, min(tops) - spec.slide_height_emu // DATA_GAP_SHARE)
+    return area.model_copy(update={"h": max(1, bottom - area.y)})
+
+
 def _free_region(
     slot: Box, area: Box, top: int, others: list[Box], spec: TemplateSpec
 ) -> Box:
@@ -1802,7 +1982,10 @@ def _free_region(
     region = Box(x=left, y=upper, w=max(1, right - left), h=max(1, lower - upper))
     if region.area <= slot.area or not _roomy_for_data(region, spec):
         clipped_top = max(slot.y, top)
-        return slot.model_copy(update={"y": clipped_top, "h": max(1, slot.bottom - clipped_top)})
+        clipped_bottom = min(slot.bottom, area.bottom)
+        return slot.model_copy(
+            update={"y": clipped_top, "h": max(1, clipped_bottom - clipped_top)}
+        )
     return region
 
 
@@ -2103,8 +2286,13 @@ def build_slide_ir(
     used: set[str] | None = None,
     pack=None,
     avoid: set[str] | None = None,
+    sections: list[str] | None = None,
 ) -> tuple[SlideIR, list[Issue]]:
-    """Один слайд: композиция шаблона, заполненная содержанием плана."""
+    """Один слайд: композиция шаблона, заполненная содержанием плана.
+
+    `sections` — разделы колоды (пункты повестки): ими подписывается маршрут
+    или ряд элементов обложки, если он у неё есть.
+    """
     pattern = _bookend(spec, plan_slide) or pick_pattern(
         spec, plan_slide, strategy, used, metrics, ladders[SlotRole.TITLE], ladders, avoid
     )
@@ -2113,7 +2301,9 @@ def build_slide_ir(
 
     if pattern is not None:
         is_dark = pattern.is_dark
-        background = next(
+        # Собственный фон донора перекрывает фон layout'а: он приедет на
+        # слайд вместе с композицией, и цвет текста выбирается под него.
+        background = pattern.background or next(
             (lay.background for lay in spec.layouts if lay.id == pattern.layout_id),
             layout.background,
         )
@@ -2201,6 +2391,26 @@ def build_slide_ir(
         )
     )
 
+    # ── Подзаголовок ─────────────────────────────────────────────────────
+    # Место подзаголовка композиции получает подзаголовок плана. Раньше его
+    # не получал никто: рамка донора оставалась пустой на каждом слайде.
+    # Нечего положить — рендер уберёт пустую фигуру.
+    subtitle_slot = _subtitle_slot(container)
+    # Заголовок в две строки при рамке донора на одну занимает место
+    # подзаголовка: тогда подзаголовка нет, а не надпись поверх заголовка.
+    if (
+        subtitle_slot is not None
+        and plan_slide.subtitle.strip()
+        and title_bottom <= subtitle_slot.box.y + subtitle_slot.box.h // 4
+    ):
+        subtitle = _subtitle_element(
+            plan_slide, subtitle_slot, container, spec, metrics, ladders, strategy,
+            font_family, is_dark, background, provenance, issues,
+        )
+        if subtitle is not None:
+            elements.append(subtitle)
+            title_bottom = max(title_bottom, subtitle.box.bottom)
+
     # ── Содержание ───────────────────────────────────────────────────────
     bookend = pattern is not None and pattern.id in spec.bookend_ids
     free_slots = (
@@ -2228,9 +2438,33 @@ def build_slide_ir(
     homeless = 0
     bands = max(1, len(plan_slide.blocks))
     # Рамки, которые слайд уже занял. Заголовок занимает свою первым.
-    taken = [title_box]
+    taken = [title_box] + [
+        element.box for element in elements if element.role is SlotRole.SUBTITLE
+    ]
 
-    for position, block in enumerate(plan_slide.blocks):
+    blocks = list(plan_slide.blocks)
+    multiples = _small_multiples(spec, container, pattern, blocks, strategy, title_bottom, pack)
+    if bookend and pattern is not None:
+        members = [
+            slot
+            for slot in _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu)
+            if slot.id not in {fixed.id for fixed in pattern.slots}
+        ]
+        cover = _cover_sections(
+            pattern, sections, free_slots + members, taken, metrics, ladders
+        )
+        if cover is not None:
+            free_slots = free_slots + members
+            blocks.append(cover)
+    # Текст садится первым, график и таблица — последними: им нужно место
+    # покрупнее, и они растут в то, что осталось. Первым график садился в
+    # строку «Бюджет» донора под карточками — графиком в полдюйма высотой,
+    # — а карточки занимали место, где он поместился бы.
+    order = sorted(
+        enumerate(blocks), key=lambda item: strategy.role_for(item[1]) in _DATA_ROLES
+    )
+    last = order[-1][0] if order else -1
+    for position, block in order:
         lines = _block_lines(block)
         if not lines:
             continue
@@ -2248,7 +2482,12 @@ def build_slide_ir(
                 _no_place_issue(plan_slide.index, block.id, _content_area(spec, container))
             )
             continue
-        if slot is None:
+        if block.id in multiples:
+            # Несколько рядов на слайде — графики в ряд, каждому своя колонка
+            # под шапкой, а не место донора: в кружке схемы график в дюйм
+            # шириной не читается.
+            seats, slot, box = [(None, lines)], None, multiples[block.id]
+        elif slot is None:
             seats = [(None, lines)]
             box = _free_band(spec, container, homeless, bands, taken)
             homeless += 1
@@ -2304,8 +2543,11 @@ def build_slide_ir(
         # соседние блоки. Последний блок — чтобы не занять место следующих.
         if role in _DATA_ROLES and slot is not None:
             top = _header_bottom(pattern, title_bottom) + spec.slide_height_emu // DATA_GAP_SHARE
-            if position == len(plan_slide.blocks) - 1:
-                box = _free_region(box, _content_area(spec, container), top, others, spec)
+            if position == last:
+                box = _free_region(
+                    box, _above_service(_content_area(spec, container), pattern, spec), top,
+                    others, spec,
+                )
             elif box.y < top:
                 box = box.model_copy(update={"y": top, "h": max(1, box.bottom - top)})
 
@@ -2326,11 +2568,17 @@ def build_slide_ir(
             pack,
             background,
             is_dark,
-            _below(
-                _content_area(spec, container),
-                _header_bottom(pattern, title_bottom) + spec.slide_height_emu // DATA_GAP_SHARE,
+            _above_service(
+                _below(
+                    _content_area(spec, container),
+                    _header_bottom(pattern, title_bottom)
+                    + spec.slide_height_emu // DATA_GAP_SHARE,
+                ),
+                pattern,
+                spec,
             ),
             plan_slide,
+            title=_series_title(block, pack) if block.id in multiples else "",
         )
         if native is not None:
             elements.append(native)
@@ -2454,6 +2702,12 @@ def build_deck_ir(
         )
     variant_name = getattr(variant, "name", str(variant))
 
+    # Композиции с фото донора сбоку — перестроенными: фото уйдёт, текст
+    # займёт его место. Так их и меряет подбор, и верстает сборка.
+    if any(pattern.photo_slots for pattern in spec.patterns):
+        spec = spec.model_copy(
+            update={"patterns": [_without_photos(pattern, spec) for pattern in spec.patterns]}
+        )
     font_family = spec.fonts[0].family if spec.fonts else "Arial"
     metrics = metrics_for_spec(spec).metrics
     # Лестница у каждой роли своя: предел «мельче нельзя» шаблон задаёт для
@@ -2462,15 +2716,22 @@ def build_deck_ir(
 
     slides: list[SlideIR] = []
     issues: list[Issue] = []
-    used: set[str] = set()
+    # Сколько раз колода уже взяла каждую композицию: разнообразие меряется
+    # числом повторов, а не только «было или нет».
+    used: Counter[str] = Counter()
     others = [
         chosen for name, chosen in (siblings or {}).items() if name != variant_name
     ]
     mine: dict[int, str] = {}
+    sections = _sections(plan)
     for plan_slide in plan.slides:
+        plan_slide = _mixed_units_as_table(
+            _tables_as_series(_heading_as_subtitle(spec, plan_slide), pack), pack
+        )
         avoid = {chosen[plan_slide.index] for chosen in others if plan_slide.index in chosen}
         built, found = _slides_for(
-            spec, plan_slide, strategy, metrics, ladders, font_family, used, pack, avoid
+            spec, plan_slide, strategy, metrics, ladders, font_family, used, pack, avoid,
+            sections,
         )
         if built and built[0].pattern_id:
             mine[plan_slide.index] = built[0].pattern_id
@@ -2497,6 +2758,352 @@ def build_deck_ir(
     )
 
 
+def _series_of_table(block, pack) -> str | None:
+    """Ряд пакета, который таблица плана пересказывает, — или None.
+
+    Таблица «Канал / Выручка» с числами ряда «Выручка по каналам» — это ряд,
+    а не таблица: две колонки, подписи и числа совпадают с рядом из входа.
+    Живой план сделал такими доли каналов и выручку по городам, и в колоде
+    о продажах не осталось ни одной диаграммы.
+    """
+    table = getattr(block, "table", None)
+    if block.kind is not BlockKind.TABLE or table is None or pack is None:
+        return None
+    if len(table.columns) != 2 or len(table.rows) < 2:
+        return None
+    values = [parse_number(row[1]) if len(row) > 1 else None for row in table.rows]
+    if any(value is None for value in values):
+        return None
+    for series in getattr(pack, "series", []):
+        if len(series.values) != len(values):
+            continue
+        if all(
+            abs(ours - theirs) <= 0.005 * max(1.0, abs(theirs))
+            for ours, theirs in zip(values, series.values, strict=True)
+        ):
+            return series.id
+    return None
+
+
+def _tables_as_series(plan_slide: SlidePlan, pack) -> SlidePlan:
+    """Таблицы плана, пересказывающие ряд из входа, — блоками ряда."""
+    blocks = []
+    changed = False
+    for block in plan_slide.blocks:
+        series_id = _series_of_table(block, pack)
+        if series_id is None:
+            blocks.append(block)
+            continue
+        changed = True
+        blocks.append(
+            block.model_copy(
+                update={"kind": BlockKind.SERIES, "series_ids": [series_id], "table": None}
+            )
+        )
+    return plan_slide.model_copy(update={"blocks": blocks}) if changed else plan_slide
+
+
+def _mixed_units_as_table(plan_slide: SlidePlan, pack) -> SlidePlan:
+    """Блок из рядов разных единиц — таблицей «категория × ряд».
+
+    Выручка в млн руб., число чеков и средний чек в руб. на одной оси: ось
+    до 60 000, и выручки не видно вовсе (шаблон экзаменов, airy). Числа
+    таблицы — из пакета, как у графика; единица — в шапке колонки.
+    """
+    if pack is None:
+        return plan_slide
+    known = {series.id: series for series in getattr(pack, "series", [])}
+    blocks = []
+    changed = False
+    for block in plan_slide.blocks:
+        chosen = [known[sid] for sid in block.series_ids if sid in known]
+        if (
+            block.kind is not BlockKind.SERIES
+            or len(chosen) < 2
+            or len({series.unit for series in chosen}) < 2
+            or any(series.categories != chosen[0].categories for series in chosen)
+        ):
+            blocks.append(block)
+            continue
+        language = pack.brief.language
+        columns = [""] + [
+            f"{series.name}, {series.unit}" if series.unit else series.name for series in chosen
+        ]
+        rows = [
+            [label]
+            + [format_value(series.values[i], series.values, language) for series in chosen]
+            for i, label in enumerate(chosen[0].categories)
+        ]
+        blocks.append(
+            block.model_copy(
+                update={
+                    "kind": BlockKind.TABLE,
+                    "table": TableData(columns=columns, rows=rows),
+                }
+            )
+        )
+        changed = True
+    return plan_slide.model_copy(update={"blocks": blocks}) if changed else plan_slide
+
+
+def _chart_kind(series, categories: list[str], unit: str, pack) -> ChartKind:
+    """Вид графика по смыслу ряда: доли — кольцом, динамика и сравнение — столбцами.
+
+    Смысл ряда (`Series.shape`) называет модель, читавшая вход: по числам доли
+    от динамики не отличить — помесячная выручка в сумме тоже даёт квартальную.
+    Неизвестен — доли узнаются только по процентам, дающим в сумме сто.
+    """
+    known = {item.id: item for item in getattr(pack, "series", [])}
+    first = next((known[sid] for sid in series if sid in known), None)
+    shape = getattr(first, "shape", None)
+    values = first.values if first is not None else []
+    parts = shape is SeriesShape.PARTS or (
+        shape is None and unit.strip() == "%" and abs(sum(values) - 100) <= 2
+    )
+    if (
+        parts
+        and len(series) == 1
+        and 2 <= len(values) <= _MAX_PARTS
+        and all(value > 0 for value in values)
+    ):
+        return ChartKind.DOUGHNUT
+    return ChartKind.COLUMN if len(categories) > 2 else ChartKind.BAR
+
+
+# Долей больше — кольцо не читается, и ряд рисуется столбцами.
+_MAX_PARTS = 6
+
+
+# Зазор между графиками в ряд — доля ширины области.
+_MULTIPLES_GUTTER_SHARE = 0.04
+
+
+def _small_multiples(
+    spec: TemplateSpec,
+    container,
+    pattern: Pattern | None,
+    blocks: list,
+    strategy: Strategy,
+    title_bottom: int,
+    pack,
+) -> dict[str, Box]:
+    """Колонки под графики, если рядов-графиков на слайде больше одного.
+
+    Выручка, чеки и средний чек по месяцам — три ряда разных единиц: на одной
+    оси их не нарисовать. Живой план положил их тремя блоками на один слайд,
+    и они садились в места донора — кружки и подписи схемы, — графиками в
+    дюйм. Здесь каждый ряд получает равную колонку во всю высоту под шапкой.
+    """
+    charts = [
+        block
+        for block in blocks
+        if block.series_ids and strategy.role_for(block) is SlotRole.CHART
+    ]
+    if len(charts) < 2 or pack is None:
+        return {}
+    area = _above_service(
+        _below(
+            _content_area(spec, container),
+            _header_bottom(pattern, title_bottom) + spec.slide_height_emu // DATA_GAP_SHARE,
+        ),
+        pattern,
+        spec,
+    )
+    others = [block for block in blocks if block not in charts and _block_lines(block)]
+    if others:
+        # Текст рядом с графиками — под ними, в нижней трети.
+        area = area.model_copy(update={"h": area.h * 2 // 3})
+    gutter = int(area.w * _MULTIPLES_GUTTER_SHARE)
+    width = (area.w - gutter * (len(charts) - 1)) // len(charts)
+    return {
+        block.id: Box(x=area.x + index * (width + gutter), y=area.y, w=width, h=area.h)
+        for index, block in enumerate(charts)
+    }
+
+
+def _series_title(block, pack) -> str:
+    """Подпись графика в ряду: имя ряда и его единица."""
+    known = {item.id: item for item in getattr(pack, "series", [])}
+    first = next((known[sid] for sid in block.series_ids if sid in known), None)
+    if first is None:
+        return block.heading
+    return f"{first.name}, {first.unit}" if first.unit else first.name
+
+
+def _cover_sections(
+    pattern: Pattern | None,
+    sections,
+    free: list,
+    taken: list[Box],
+    metrics: FontMetrics | None = None,
+    ladders: dict[SlotRole, list[float]] | None = None,
+):
+    """Разделы колоды блоком для ряда элементов обложки — или None.
+
+    Маршрут из шести узлов на обложке «Дорожной карты» — оформление, а
+    подписи узлов («Идея», «План») — текст шаблона. Подписать их разделами
+    колоды — то же, что делает слайд-повестка. Разделов больше, чем узлов, —
+    не подписываем: два раздела в одном узле хуже пустых узлов. Раздел не
+    влезает в подпись узла кеглем шаблона — тоже: маршрут без подписей лучше
+    подписей мельче шкалы.
+    """
+    if pattern is None or pattern.pattern_class is not PatternClass.TITLE or not sections:
+        return None
+    if len(sections) < 2:
+        return None
+    block = ContentBlock(id="sections", kind=BlockKind.STEPS, items=list(sections))
+    for repeater in pattern.repeaters:
+        if repeater.observed_count < len(sections):
+            continue
+        trial = _spread(pattern, block, SlotRole.CAPTION, list(free), taken)
+        if trial is None or len(trial) != len(sections):
+            continue
+        if metrics is not None and ladders:
+            for slot, lines in trial:
+                ladder = ladders[slot.role]
+                declared = (
+                    slot.style.size_pt
+                    if slot.style is not None
+                    else (ladder[-1] if ladder else 12.0)
+                )
+                if not fit_size(" ".join(lines), metrics, slot.box, [declared], declared).fits:
+                    return None
+        return block
+    return None
+
+
+def _sections(plan) -> list[str]:
+    """Разделы колоды — пункты первого списка на слайде-повестке."""
+    for plan_slide in plan.slides:
+        if plan_slide.intent is not SlideIntent.AGENDA:
+            continue
+        for block in plan_slide.blocks:
+            if block.kind in _SPREAD_KINDS and len(block.items) > 1:
+                return list(block.items)
+    return []
+
+
+def _subtitle_element(
+    plan_slide: SlidePlan,
+    slot,
+    container,
+    spec: TemplateSpec,
+    metrics: FontMetrics | None,
+    ladders: dict[SlotRole, list[float]],
+    strategy: Strategy,
+    font_family: str,
+    is_dark: bool,
+    background: Color | None,
+    provenance: Provenance,
+    issues: list[Issue],
+) -> Element | None:
+    """Подзаголовок слайда в месте подзаголовка композиции, кеглем этого места."""
+    ladder = ladders[SlotRole.SUBTITLE] or ladders[SlotRole.BODY]
+    declared = (
+        slot.style.size_pt
+        if slot.style is not None
+        else _undeclared(spec, SlotRole.SUBTITLE, ladder)
+    )
+    start = strategy.start_size(ladder, declared)
+    element_id = f"s{plan_slide.index}_subtitle"
+    size, steps, overflowed, capacity, used = start, 0, False, 0, 0
+    if metrics is not None:
+        fit = fit_size(plan_slide.subtitle, metrics, slot.box, ladder, start)
+        size, steps, overflowed = fit.size_pt, fit.steps_down, not fit.fits
+        capacity, used = fit.capacity_lines, fit.lines
+        if overflowed:
+            issues.append(
+                _overflow_issue(plan_slide.index, element_id, slot.box, fit, "подзаголовок")
+            )
+    return Element(
+        id=element_id,
+        kind=ElementKind.TEXT,
+        role=SlotRole.SUBTITLE,
+        box=slot.box,
+        provenance=provenance,
+        backdrop=_under(slot, None),
+        text=TextContent(
+            scale_steps_down=steps,
+            truncated=overflowed,
+            capacity_lines=capacity,
+            used_lines=used,
+            paragraphs=[
+                Paragraph(
+                    text=plan_slide.subtitle.strip(),
+                    style=TextStyle(
+                        font_family=font_family,
+                        size_pt=size,
+                        align=_align_of(slot),
+                        valign=_valign_of(slot),
+                        color=_text_color(
+                            container,
+                            SlotRole.SUBTITLE,
+                            is_dark,
+                            _under(slot, background),
+                            spec,
+                            slot=slot,
+                            size_pt=size,
+                        ),
+                    ),
+                )
+            ],
+        ),
+    )
+
+
+def _subtitle_slot(container):
+    for slot in getattr(container, "slots", []):
+        if slot.role is SlotRole.SUBTITLE:
+            return slot
+    return None
+
+
+def _heading_as_subtitle(spec: TemplateSpec, plan_slide: SlidePlan) -> SlidePlan:
+    """Заголовок списка — в подзаголовок слайда, если тот пуст.
+
+    Список с заголовком («Ключевые метрики» и три пункта) по карточкам не
+    раскладывался: заголовку не было места, и весь блок садился в одно поле
+    первой карточки — «01» с заголовком и всеми пунктами в `check-title-0`
+    на пяти слайдах колоды. Шаблон держит под это место подзаголовка; туда
+    заголовок и уходит, а пункты — каждый в свою карточку.
+
+    Подзаголовок уже занят — заголовок списка уходит в заметки докладчика:
+    заголовок и подзаголовок слайда и так говорят, о чём список, а пункты
+    получают по карточке. Потерять его молча нельзя, втиснуть — тоже.
+    """
+    headed = [
+        block
+        for block in plan_slide.blocks
+        if block.kind in _SPREAD_KINDS and block.heading.strip() and len(block.items) > 1
+    ]
+    if len(headed) != 1 or not any(
+        repeater.observed_count > 1
+        for pattern in spec.patterns
+        if pattern.id not in spec.bookend_ids
+        for repeater in pattern.repeaters
+    ):
+        return plan_slide
+    block = headed[0]
+    heading = block.heading.strip()
+    update: dict[str, object] = {
+        "blocks": [
+            other.model_copy(update={"heading": ""}) if other is block else other
+            for other in plan_slide.blocks
+        ]
+    }
+    has_subtitle = any(
+        _subtitle_slot(pattern) is not None
+        for pattern in spec.patterns
+        if pattern.id not in spec.bookend_ids
+    )
+    if has_subtitle and not plan_slide.subtitle.strip():
+        update["subtitle"] = heading
+    else:
+        notes = plan_slide.speaker_notes.strip()
+        update["speaker_notes"] = f"{heading}. {notes}".strip() if notes else heading
+    return plan_slide.model_copy(update=update)
+
+
 def _slides_for(
     spec: TemplateSpec,
     plan_slide: SlidePlan,
@@ -2507,6 +3114,7 @@ def _slides_for(
     used: set[str],
     pack=None,
     avoid: set[str] | None = None,
+    sections: list[str] | None = None,
 ) -> tuple[list[SlideIR], list[Issue]]:
     """Слайд, а если он переполнен и деление помогает — два.
 
@@ -2522,7 +3130,7 @@ def _slides_for(
     шесть наложений на колоду.
     """
     slide, issues = build_slide_ir(
-        spec, plan_slide, strategy, metrics, ladders, font_family, used, pack, avoid
+        spec, plan_slide, strategy, metrics, ladders, font_family, used, pack, avoid, sections
     )
 
     # Переполнение заголовка делением не лечится: у обеих половин заголовок
@@ -2533,8 +3141,12 @@ def _slides_for(
         for issue in issues
         if issue.check_id == "layout.text_overflow" and title_id not in issue.element_ids
     ]
+    # График или таблица в месте, где их не прочитать (строка «Бюджет» под
+    # карточками — полдюйма высоты), — такая же причина делить, как
+    # переполнение: у половины с одним графиком место найдётся.
+    cramped = _cramped_data(slide, spec)
     # Обложку и финал не делят: вторая обложка — не выход.
-    if not content_overflow or slide.pattern_id in spec.bookend_ids:
+    if (not content_overflow and not cramped) or slide.pattern_id in spec.bookend_ids:
         return [slide], issues
 
     parts = split_blocks(list(plan_slide.blocks))
@@ -2556,7 +3168,7 @@ def _slides_for(
             metrics,
             ladders,
             font_family,
-            used | {slide.pattern_id or ""},
+            used + Counter([slide.pattern_id or ""]),
             pack,
             avoid,
         )
@@ -2572,6 +3184,64 @@ def _slides_for(
     # переполнения, — чистый проигрыш: колода длиннее, а текст всё так же не
     # влезает. На синтетическом шаблоне безусловное деление растило колоду с
     # десяти слайдов до пятнадцати и число находок с шести до одиннадцати.
+    if cramped:
+        if any(_cramped_data(half, spec) for half in halves) or len(remaining) > len(issues):
+            return _roomier(
+                spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+                avoid, sections, slide, issues,
+            )
+        return halves, remaining
     if len(remaining) >= len(issues):
         return [slide], issues
     return halves, remaining
+
+
+def _roomier(
+    spec: TemplateSpec,
+    plan_slide: SlidePlan,
+    strategy: Strategy,
+    metrics: FontMetrics | None,
+    ladders: dict[SlotRole, list[float]],
+    font_family: str,
+    used,
+    pack,
+    avoid: set[str] | None,
+    sections: list[str] | None,
+    slide: SlideIR,
+    issues: list[Issue],
+) -> tuple[list[SlideIR], list[Issue]]:
+    """Тот же слайд в другой композиции, где графику хватает места.
+
+    Деление не помогло: у половины с графиком тот же тесный остаток. На
+    шаблоне экзаменов график ложился полосой в 0.1–0.55″ под текстом. Здесь
+    слайд собирается заново, избегая уже опробованных композиций, пока график
+    не станет читаемым или композиции не кончатся; не вышло — остаётся первый.
+    """
+    tried = {slide.pattern_id or ""}
+    for _ in range(len(spec.patterns)):
+        other, found = build_slide_ir(
+            spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+            (avoid or set()) | tried, sections,
+        )
+        if not _cramped_data(other, spec):
+            return [other], found
+        if (other.pattern_id or "") in tried:
+            break
+        tried.add(other.pattern_id or "")
+    return [slide], issues
+
+
+def _cramped_data(slide: SlideIR, spec: TemplateSpec) -> bool:
+    """Есть ли на слайде график или таблица в месте, где их не прочитать."""
+    for element in slide.elements:
+        if element.kind not in (ElementKind.CHART, ElementKind.TABLE):
+            continue
+        # График в ряду («малые графики») уже трети слайда по замыслу: у него
+        # меряется только высота.
+        in_row = element.chart is not None and bool(element.chart.title)
+        if in_row and element.box.h >= spec.slide_height_emu * _DATA_MIN_HEIGHT_SHARE:
+            continue
+        if not in_row and _roomy_for_data(element.box, spec):
+            continue
+        return True
+    return False

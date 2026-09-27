@@ -29,6 +29,7 @@ from deckwright.schemas.content_pack import (
     NumericPoint,
     Quote,
     Series,
+    SeriesShape,
     SourceDoc,
 )
 from deckwright.schemas.deck_plan import (
@@ -140,6 +141,7 @@ __all__ = [
     "RunManifest",
     "RunSummary",
     "Series",
+    "SeriesShape",
     "Severity",
     "ShapeContent",
     "SlideIR",

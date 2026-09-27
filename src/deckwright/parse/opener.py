@@ -37,6 +37,7 @@ from deckwright.parse.patterns import (
     text_align,
     text_valign,
 )
+from deckwright.parse.pictures import photo_boxes
 from deckwright.parse.recurring import find_recurring
 from deckwright.parse.semantics import classified
 from deckwright.schemas import (
@@ -549,6 +550,7 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
         layout_use[key] = layout_use.get(key, 0) + 1
     patterns = []
     backdrops: dict[int, Color | None] = {}
+    own_backgrounds: dict[int, tuple[Color | None, str | None]] = {}
     titles_declared = declares_titles(list(prs.slides))
     for index, slide in enumerate(prs.slides, start=1):
         layout_id = layout_ids.get(id(slide.slide_layout._element))
@@ -557,7 +559,15 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
             slide.shapes._spTree, slide_w, slide_h, theme, primary_map
         )
         inherited = by_layout_id.get(layout_id).background if layout_id in by_layout_id else None
-        effective = own_backdrop or inherited
+        # Собственный фон слайда (`p:bg`) перекрывает фон layout'а и мастера:
+        # бланк «Дорожная карта» красит так каждый слайд, а финал — в тёмный.
+        bg_node = tokens_mod.own_background(slide._element)
+        own_bg = (
+            tokens_mod.resolve_color(bg_node, theme, primary_map)
+            if bg_node is not None
+            else None
+        )
+        effective = own_backdrop or own_bg or inherited
         pattern = mine_slide(
             slide.shapes._spTree,
             index,
@@ -589,6 +599,11 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                         for slot in pattern.slots
                     ],
                     "figure_pictures": _figure_pictures(tree),
+                    "background": own_bg,
+                    "photo_slots": photo_boxes(tree, slide.part, slide_w, slide_h),
+                    "background_signature": tokens_mod.background_signature(
+                        bg_node, slide.part
+                    ),
                     "decor": _decor(tree, pattern, slide_w, slide_h),
                     "baked_items": bool(pattern.repeaters)
                     and _layout_draws_items(slide.slide_layout, layout_use, slide_w, slide_h),
@@ -615,10 +630,15 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                     ],
                 }
             )
+            pattern = _sequence_ordinals(pattern, tree)
             if not titles_declared:
                 pattern = _table_grid(_grown_frames(tree, pattern, slide_w, slide_h))
             patterns.append(classified(pattern, slide_w, slide_h))
         backdrops[index] = effective
+        own_backgrounds[index] = (
+            own_bg,
+            tokens_mod.background_signature(bg_node, slide.part),
+        )
 
     # ── Обложка и финал ──────────────────────────────────────────────────────
     slides = list(prs.slides)
@@ -656,6 +676,16 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                     if not any(_overlap(r.item_box, frame) for frame in covered)
                 ]
                 bookend = bookend.model_copy(update={"repeaters": own + mined.repeaters})
+            color, signature = own_backgrounds.get(number, (None, None))
+            bookend = bookend.model_copy(
+                update={
+                    "background": color,
+                    "background_signature": signature,
+                    "photo_slots": photo_boxes(
+                        slide.shapes._spTree, slide.part, slide_w, slide_h
+                    ),
+                }
+            )
             patterns.append(bookend)
             bookend_ids[kind] = bookend.id
 
@@ -676,6 +706,8 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
             f"композиции сняты лишь с {len(patterns)} слайдов из {slide_count}: "
             "шаблон беден примерами, вёрстка будет опираться на поля и сетку"
         )
+
+    patterns = _repeated_labels_as_footers(patterns, slide_h)
 
     # ── Повторяющиеся элементы ───────────────────────────────────────────────
     per_slide: list[list[etree._Element]] = []
@@ -727,6 +759,107 @@ def _layout_draws_items(layout, layout_use: dict[int, int], slide_w: int, slide_
 _NOT_TEXT_ROLES = frozenset(
     {SlotRole.IMAGE, SlotRole.ICON, SlotRole.CHART, SlotRole.TABLE, SlotRole.DECOR, SlotRole.LOGO}
 )
+
+
+# Нижняя полоса слайда, где живут колонтитулы.
+_FOOTER_BAND = 0.8
+
+
+def _repeated_labels_as_footers(patterns: list[Pattern], slide_h: int) -> list[Pattern]:
+    """Одна и та же подпись внизу нескольких слайдов — колонтитул, не место.
+
+    «Презентация создана в Fibonacci» стоит внизу обложки и финала шаблона
+    экзаменов. Другого текстового места на обложке нет, и подзаголовок колоды
+    садился в эту строку и переполнял её. Надпись, повторённая дословно на
+    двух и более слайдах в нижней полосе, — оформление шаблона.
+    """
+    seen: dict[str, set[int]] = {}
+    for pattern in patterns:
+        for slot in pattern.slots:
+            text = " ".join(slot.placeholder_text.split())
+            if text and slot.box.y >= slide_h * _FOOTER_BAND:
+                seen.setdefault(text, set()).add(pattern.donor_slide_index)
+    repeated = {text for text, slides in seen.items() if len(slides) >= 2}
+    if not repeated:
+        return patterns
+
+    def footer(slot: Slot) -> Slot:
+        text = " ".join(slot.placeholder_text.split())
+        if (
+            text in repeated
+            and slot.box.y >= slide_h * _FOOTER_BAND
+            and slot.role not in (SlotRole.SLIDE_NUMBER, SlotRole.TITLE)
+        ):
+            return slot.model_copy(update={"role": SlotRole.FOOTER})
+        return slot
+
+    return [
+        pattern.model_copy(update={"slots": [footer(slot) for slot in pattern.slots]})
+        for pattern in patterns
+    ]
+
+
+def _sequence_ordinals(pattern: Pattern, tree) -> Pattern:
+    """Номера по порядку в фигурах одного размера — порядковые номера, не показатели.
+
+    «01», «02», «03» в кружках шаблона экзаменов разбирались местом под
+    показатель (короткий крупный текст): туда садились «47,3 млн руб.» и
+    пункты списка, и текст шёл колонкой шириной в дюйм. «02» стоит со
+    сдвигом, поэтому «01» и «03» попадали в повторитель, а «02» — в
+    отдельное место: ряд виден только по всем фигурам слайда сразу. Число в
+    ряду 1, 2, 3… с соседями того же размера — номер элемента. Одиночное «7»
+    с подписью (`vk_tech`) остаётся показателем.
+    """
+    numbers: list[tuple[Box, int]] = []
+    for element, box, _ in iter_shapes(tree):
+        body = element.find(f"{{{P_NS}}}txBody")
+        if box is None or body is None:
+            continue
+        text = "".join(node.text or "" for node in body.iter(f"{{{A_NS}}}t")).strip()
+        if text.isdigit() and len(text) <= 2:
+            numbers.append((box, int(text)))
+    ordinal_boxes: list[Box] = []
+    for box, _ in numbers:
+        twins = [
+            (other, value)
+            for other, value in numbers
+            if abs(other.w - box.w) <= box.w // 10 and abs(other.h - box.h) <= box.h // 10
+        ]
+        values = sorted(value for _, value in twins)
+        if len(twins) >= 2 and values == list(range(1, len(twins) + 1)):
+            ordinal_boxes.append(box)
+    if not ordinal_boxes:
+        return pattern
+
+    def on_ordinal(box: Box) -> bool:
+        return any(_covers_most(box, other) and _covers_most(other, box) for other in ordinal_boxes)
+
+    def marked(slot: Slot, offsets: list[tuple[int, int]]) -> Slot:
+        if slot.role in (SlotRole.TITLE, SlotRole.SLIDE_NUMBER, SlotRole.ORDINAL):
+            return slot
+        if any(
+            on_ordinal(slot.box.model_copy(update={"x": slot.box.x + dx, "y": slot.box.y + dy}))
+            for dx, dy in offsets
+        ):
+            return slot.model_copy(update={"role": SlotRole.ORDINAL})
+        return slot
+
+    return pattern.model_copy(
+        update={
+            "slots": [marked(slot, [(0, 0)]) for slot in pattern.slots],
+            "repeaters": [
+                repeater.model_copy(
+                    update={
+                        "item_slots": [
+                            marked(slot, repeater.member_offsets or [(0, 0)])
+                            for slot in repeater.item_slots
+                        ]
+                    }
+                )
+                for repeater in pattern.repeaters
+            ],
+        }
+    )
 
 
 def _figure_pictures(tree) -> list[Box]:

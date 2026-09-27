@@ -177,6 +177,24 @@ def text_band(element) -> Box:
     return Box(x=box.x, y=top, w=box.w, h=height)
 
 
+def _template_boxes(pattern) -> set[tuple[int, int, int, int]]:
+    """Рамки мест композиции, включая места каждого элемента повторителя.
+
+    Подпись первого узла маршрута на обложке «Дорожной карты» стоит левее
+    выведенного поля — там, где её поставил шаблон. Без мест повторителя
+    автоправка «вернуть в поля» сдвигала её, рендер не находил рамку донора,
+    и узел вместе с номером уходил как незаполненный.
+    """
+    boxes = {(slot.box.x, slot.box.y, slot.box.w, slot.box.h) for slot in pattern.slots}
+    for repeater in pattern.repeaters:
+        for dx, dy in repeater.member_offsets:
+            boxes.update(
+                (slot.box.x + dx, slot.box.y + dy, slot.box.w, slot.box.h)
+                for slot in repeater.item_slots
+            )
+    return boxes
+
+
 def margins(slide: SlideIR, deck: DeckIR, spec: TemplateSpec) -> list[Issue]:
     """Поля шаблона — не рекомендация: по ним колода читается как одна вещь."""
     grid = spec.grid
@@ -191,8 +209,10 @@ def margins(slide: SlideIR, deck: DeckIR, spec: TemplateSpec) -> list[Issue]:
     # его поставил автор шаблона: на `zelenie_investicii` заголовок шаблона
     # выше выведенного поля на 0.12″, и «правка» каждого заголовка стоила
     # полной пересборки и повторного аудита моделью всех слайдов.
-    slot_boxes = {
-        pattern.id: {slot.box for slot in pattern.slots} for pattern in spec.patterns
+    slot_boxes = {pattern.id: _template_boxes(pattern) for pattern in spec.patterns}
+    member_frames = {
+        pattern.id: [frame for r in pattern.repeaters for frame in r.member_frames]
+        for pattern in spec.patterns
     }
 
     found: list[Issue] = []
@@ -200,7 +220,16 @@ def margins(slide: SlideIR, deck: DeckIR, spec: TemplateSpec) -> list[Issue]:
         if element.role in _MARGIN_EXEMPT:
             continue
         box = element.box
-        if box in slot_boxes.get(element.provenance.ref, ()):
+        if (box.x, box.y, box.w, box.h) in slot_boxes.get(element.provenance.ref, ()):
+            continue
+        # Место элемента повторителя, выросшее на всю его текстовую область:
+        # внутри рамки элемента донора — там, где его поставил шаблон.
+        if any(
+            frame.x - GRID_TOLERANCE_EMU <= box.x
+            and box.right <= frame.right + GRID_TOLERANCE_EMU
+            for frame in member_frames.get(element.provenance.ref, ())
+            if frame.y - GRID_TOLERANCE_EMU <= box.y <= frame.bottom
+        ):
             continue
         over = max(left - box.x, top - box.y, box.right - right, box.bottom - bottom)
         if over <= GRID_TOLERANCE_EMU:
