@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +69,30 @@ class ContextualResult:
     # Текстовый проход не задавался заново: ответы принесены с другого
     # варианта. Не то же самое, что «пропущен»: вопрос задан, просто один раз.
     text_reused: bool = False
+
+
+class SharedTextPass:
+    """Текстовый проход, один на колоду, для вариантов, идущих параллельно.
+
+    Вопросы прохода задаются по плану, а план у вариантов один. Пока варианты
+    шли по очереди, ответы первого просто передавались следующему. Параллельно
+    так нельзя: вариант, пришедший первым, задаёт вопрос, остальные ждут его
+    ответа на блокировке — а их проход по картинкам тем временем идёт.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._done = False
+        self._value: tuple[list[Issue], str] = ([], "")
+
+    def get(self, compute: Callable[[], tuple[list[Issue], str]]) -> tuple[list[Issue], str, bool]:
+        """Ответ прохода и признак «получен другим вариантом»."""
+        with self._lock:
+            if self._done:
+                return (*self._value, True)
+            self._value = compute()
+            self._done = True
+            return (*self._value, False)
 
 
 def _questions(check_ids: list[str]) -> str:
@@ -223,7 +249,7 @@ def run(
     cfg,
     only_slides: set[int] | None = None,
     prompts_dir: str | Path | None = None,
-    text_findings: list[Issue] | None = None,
+    text_findings: list[Issue] | SharedTextPass | None = None,
 ) -> ContextualResult:
     """Оба контекстных прохода. Невыполненное честно перечисляется.
 
@@ -249,6 +275,24 @@ def run(
             result.skipped[check_id] = "модель недоступна: вопрос не задан"
         return result
 
+    # Текстовый проход — один вызов по плану, от картинок не зависит. Он идёт
+    # одновременно с проходом по картинкам, а не после него: по очереди это
+    # сумма двух самых долгих вызовов аудита вместо большего из них.
+    text_ids = audit.checks_by_mode("text")
+
+    def compute() -> tuple[list[Issue], str]:
+        return _text_pass(plan, client, text_ids, prompts_dir)
+
+    def text_part() -> tuple[list[Issue], str, bool]:
+        if audit.text_checks_once_per_deck and isinstance(text_findings, list):
+            return text_findings, "", True
+        if audit.text_checks_once_per_deck and isinstance(text_findings, SharedTextPass):
+            return text_findings.get(compute)
+        return (*compute(), False)
+
+    text_pool = ThreadPoolExecutor(max_workers=1) if text_ids else None
+    text_job = text_pool.submit(text_part) if text_pool is not None else None
+
     image_ids = audit.checks_by_mode("image")
     if image_ids:
         issues, problems = _image_pass(
@@ -266,16 +310,13 @@ def run(
             for check_id in image_ids:
                 result.skipped[check_id] = "; ".join(problems[:3])
 
-    text_ids = audit.checks_by_mode("text")
-    if text_ids:
-        if text_findings is not None and audit.text_checks_once_per_deck:
-            result.issues.extend(text_findings)
-            result.text_reused = True
-        else:
-            issues, problem = _text_pass(plan, client, text_ids, prompts_dir)
-            result.issues.extend(issues)
-            if problem:
-                for check_id in text_ids:
-                    result.skipped[check_id] = problem
+    if text_job is not None:
+        issues, problem, reused = text_job.result()
+        text_pool.shutdown()
+        result.issues.extend(issues)
+        result.text_reused = reused
+        if problem:
+            for check_id in text_ids:
+                result.skipped[check_id] = problem
 
     return result

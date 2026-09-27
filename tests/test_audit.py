@@ -961,3 +961,68 @@ def test_number_written_on_a_slide_but_absent_from_the_input_is_caught(pack):
     plan.slides[2].blocks[0].items.append("Рост выручки на 37 % за год")
     found = undeclared_numbers(plan, pack)
     assert [issue.check_id for issue in found] == ["content.undeclared_number"]
+
+
+def test_element_in_its_template_slot_is_not_a_margin_violation(pack):
+    """Поля выведены эвристикой, рамка слота — сам шаблон.
+
+    На `zelenie_investicii` заголовок шаблона стоит выше выведенного поля на
+    0.12″: находка на каждом слайде стоила полной пересборки колоды.
+    """
+    from deckwright.layout.matcher import build_deck_ir
+    from deckwright.layout.strategy import Strategy
+    from deckwright.parse.opener import parse_template
+    from deckwright.schemas import DeckPlan
+
+    path = Path(__file__).parents[1] / "data" / "holdout" / "zelenie_investicii.pptx"
+    if not path.exists():
+        pytest.skip("нет шаблона holdout")
+    spec = parse_template(path)
+    cfg = load_config(CONFIG)
+    recorded = Path(__file__).parent / "fixtures" / "recorded" / "plan_deck.json"
+    plan = DeckPlan.model_validate_json(recorded.read_text("utf-8"))
+    deck, _ = build_deck_ir(
+        spec, plan, cfg.variants[0].name, Strategy.from_config(cfg.variants[0]), pack=pack
+    )
+    in_slot = [
+        (slide, element)
+        for slide in deck.slides
+        for element in slide.all_elements()
+        if any(
+            element.box == slot.box
+            for pattern in spec.patterns if pattern.id == element.provenance.ref
+            for slot in pattern.slots
+        )
+    ]
+    assert in_slot, "ни один элемент не стоит в рамке слота"
+    flagged = {
+        tuple(issue.element_ids)
+        for slide, _ in in_slot
+        for issue in geometry.margins(slide, deck, spec)
+    }
+    assert not any((element.id,) in flagged for _, element in in_slot)
+
+
+def test_shared_text_pass_asks_the_model_once_for_parallel_variants():
+    """Три варианта параллельно — один текстовый проход, два берут его ответ."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from deckwright.audit.contextual.runner import SharedTextPass
+
+    shared = SharedTextPass()
+    calls = []
+    lock = threading.Lock()
+
+    def compute():
+        with lock:
+            calls.append(1)
+        time.sleep(0.05)
+        return [], ""
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        answers = list(pool.map(lambda _: shared.get(compute), range(3)))
+
+    assert len(calls) == 1
+    assert sorted(reused for _, _, reused in answers) == [False, True, True]

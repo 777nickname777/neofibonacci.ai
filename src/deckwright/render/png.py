@@ -11,8 +11,10 @@ PNG нужны дважды: как превью в интерфейсе и ка
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -52,6 +54,39 @@ def _ranges(pages: set[int]) -> list[tuple[int, int]]:
         else:
             result.append((page, page))
     return result
+
+
+def _spans(pages: set[int], workers: int) -> list[tuple[int, int]]:
+    """Страницы кусками для параллельной растеризации.
+
+    pdftoppm однопоточный: 13 страниц `zelenie_investicii` подряд — 16 с,
+    по 1–1.4 с на страницу. Подряд идущие страницы режутся на куски так,
+    чтобы работы хватило на все ядра.
+    """
+    size = max(1, -(-len(pages) // max(1, workers)))
+    result: list[tuple[int, int]] = []
+    for first, last in _ranges(pages):
+        for start in range(first, last + 1, size):
+            result.append((start, min(start + size - 1, last)))
+    return result
+
+
+def _render_spans(
+    pdf_path: Path, prefix: Path, dpi: int, timeout_seconds: int, pages: set[int]
+) -> None:
+    spans = _spans(pages, os.cpu_count() or 1)
+    with ThreadPoolExecutor(max_workers=len(spans)) as pool:
+        results = list(
+            pool.map(lambda span: _render(pdf_path, prefix, dpi, timeout_seconds, span), spans)
+        )
+    for span, result in zip(spans, results, strict=True):
+        # Молча вернуть прошлые картинки нельзя: они от предыдущей сборки, и
+        # отчёт был бы про другую колоду.
+        if result.returncode != 0:
+            raise RasterizeError(
+                f"страницы {span[0]}–{span[1]} не перерисованы: "
+                f"{(result.stdout or result.stderr or '').strip()[:400]}"
+            )
 
 
 def _render(
@@ -113,23 +148,19 @@ def pdf_to_png(
             # Не изменилось ничего: перерисовывать нечего, и это законный
             # случай — правка могла не тронуть ни одной страницы.
             return existing
-        for span in _ranges(only_pages):
-            result = _render(pdf_path, prefix, dpi, timeout_seconds, span)
-            # Молча вернуть прошлые картинки нельзя: они от предыдущей
-            # сборки, и отчёт был бы про другую колоду.
-            if result.returncode != 0:
-                raise RasterizeError(
-                    f"страницы {span[0]}–{span[1]} не перерисованы: "
-                    f"{(result.stdout or result.stderr or '').strip()[:400]}"
-                )
+        _render_spans(pdf_path, prefix, dpi, timeout_seconds, only_pages)
     else:
         # Полная растеризация: сначала убираем прошлые картинки. Иначе колода,
         # ставшая короче, оставила бы хвост от предыдущей сборки, и в отчёт
         # уехали бы страницы, которых в `.pdf` уже нет.
         for stale in existing:
             stale.unlink()
-        result = _render(pdf_path, prefix, dpi, timeout_seconds, None)
-        if result.returncode != 0:
+        if total:
+            _render_spans(pdf_path, prefix, dpi, timeout_seconds, set(range(1, total + 1)))
+            result = None
+        else:
+            result = _render(pdf_path, prefix, dpi, timeout_seconds, None)
+        if result is not None and result.returncode != 0:
             raise RasterizeError(
                 f"растеризация {pdf_path.name} оборвалась: "
                 f"{(result.stdout or result.stderr or '').strip()[:400]}"

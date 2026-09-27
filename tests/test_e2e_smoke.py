@@ -224,3 +224,43 @@ def test_run_needs_nothing_but_a_config_file(template_paths, tmp_path, monkeypat
     )
     out = capsys.readouterr().out
     assert "разбор входа" in out and "генерация вариантов" in out
+
+
+def test_parallel_variants_match_sequential_ones(template_paths, pack, recorded_dir, tmp_path):
+    """Раскладка по очереди, сборка параллельно — колоды те же, что подряд.
+
+    Композиции вариант выбирает, избегая взятых предыдущими (A12): если бы
+    раскладка шла параллельно, результат зависел бы от того, кто успел.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from deckwright.pipeline import complete_variant, lay_out_variant
+
+    cfg = load_config(CONFIG)
+    variants = ("dense", "balanced", "airy")
+
+    prepared = None
+    sequential = []
+    client = RecordedClient(recorded_dir)
+    for variant in variants:
+        result = run_variant(
+            template_path=template_paths[0], pack=pack, cfg=cfg, client=client,
+            variant=variant, output_dir=tmp_path / "seq" / variant, prepared=prepared,
+        )
+        prepared = result.prepared
+        sequential.append(result.deck)
+
+    client = RecordedClient(recorded_dir)
+    prepared = None
+    laid_out = []
+    for variant in variants:
+        laid = lay_out_variant(
+            template_path=template_paths[0], pack=pack, cfg=cfg, client=client,
+            variant=variant, output_dir=tmp_path / "par" / variant, prepared=prepared,
+        )
+        prepared = laid.prepared
+        laid_out.append(laid)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        parallel = [result.deck for result in pool.map(complete_variant, laid_out)]
+
+    assert parallel == sequential
