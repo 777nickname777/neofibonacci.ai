@@ -20,6 +20,16 @@
 
 Все признаки вместе: крупная непрозрачная картинка из пяти цветов —
 плашка, а мелкая многоцветная — значок.
+
+На слайдах содержания к фото добавляются **иллюстрации**: 3D-рендеры и
+скриншоты донора (фигуры в карточках «Команда» и скриншот VK WorkSpace на
+`vk_tech`, ноутбук с сайтом на `vk_education`). Они лежат на прозрачном или
+белом поле и фото-признаков не проходят, но так же иллюстрируют тему донора.
+Иллюстрация — крупная (`MIN_ILLUSTRATION_SHARE`) картинка с тонкими
+переходами (`MIN_ILLUSTRATION_COLORS`), не касающаяся двух краёв слайда:
+плашки и карточки, нарисованные картинкой, — это десятки цветов, а
+фирменный декор навылет в угол (линии `vk_workspace`) — оформление. На
+обложке и финале иллюстрации остаются: фирменный куб — лицо шаблона.
 """
 
 from __future__ import annotations
@@ -46,12 +56,17 @@ MAX_TRANSPARENT_SHARE = 0.02
 # Доля кадра под самым частым цветом (огрублённым до 8 уровней на канал),
 # выше которой картинка — графика на поле, а не фото.
 MAX_DOMINANT_SHARE = 0.4
+# Иллюстрация слайда содержания: доля площади слайда и число цветов в
+# уменьшенной до 64×64 картинке. 3D-значки в карточках `vk_tech` — 0.07,
+# фигуры «Команды» — 0.13; плашки-картинки — 1–60 цветов, рендеры и
+# скриншоты — 400+ (кубы под карточками «Команды» — 489).
+MIN_ILLUSTRATION_SHARE = 0.1
+MIN_ILLUSTRATION_COLORS = 400
+# Край слайда: картинка ближе к нему, чем эта доля, — навылет.
+_EDGE_SHARE = 0.01
 
 
-def is_photo(blob: bytes, box: Box, slide_w: int, slide_h: int) -> bool:
-    """Фото-иллюстрация шаблона (место под картинку), а не декор и не логотип."""
-    if box.w * box.h < MIN_PHOTO_SHARE * slide_w * slide_h:
-        return False
+def _pixels(blob: bytes) -> list[bytes] | None:
     try:
         from PIL import Image
 
@@ -60,9 +75,18 @@ def is_photo(blob: bytes, box: Box, slide_w: int, slide_h: int) -> bool:
         small = image.convert("RGBA").resize((64, 64))
     except Exception:
         # Векторная картинка (EMF, SVG) или битая — не фото.
-        return False
+        return None
     raw = small.tobytes()
-    pixels = [raw[i : i + 4] for i in range(0, len(raw), 4)]
+    return [raw[i : i + 4] for i in range(0, len(raw), 4)]
+
+
+def is_photo(blob: bytes, box: Box, slide_w: int, slide_h: int) -> bool:
+    """Фото-иллюстрация шаблона (место под картинку), а не декор и не логотип."""
+    if box.w * box.h < MIN_PHOTO_SHARE * slide_w * slide_h:
+        return False
+    pixels = _pixels(blob)
+    if pixels is None:
+        return False
     transparent = sum(1 for pixel in pixels if pixel[3] < 250)
     if transparent > MAX_TRANSPARENT_SHARE * len(pixels):
         return False
@@ -72,8 +96,34 @@ def is_photo(blob: bytes, box: Box, slide_w: int, slide_h: int) -> bool:
     return coarse.most_common(1)[0][1] <= MAX_DOMINANT_SHARE * len(pixels)
 
 
-def photo_boxes(tree: etree._Element, part, slide_w: int, slide_h: int) -> list[Box]:
-    """Рамки фото на слайде: картинки и фигуры с заливкой-картинкой."""
+def is_illustration(blob: bytes, box: Box, slide_w: int, slide_h: int) -> bool:
+    """3D-рендер или скриншот донора: крупный, в тонких переходах, не навылет."""
+    if box.w * box.h < MIN_ILLUSTRATION_SHARE * slide_w * slide_h:
+        return False
+    edges = sum(
+        (
+            box.x <= slide_w * _EDGE_SHARE,
+            box.y <= slide_h * _EDGE_SHARE,
+            box.right >= slide_w * (1 - _EDGE_SHARE),
+            box.bottom >= slide_h * (1 - _EDGE_SHARE),
+        )
+    )
+    if edges >= 2:
+        return False
+    pixels = _pixels(blob)
+    if pixels is None:
+        return False
+    return len({pixel[:3] for pixel in pixels if pixel[3] >= 250}) >= MIN_ILLUSTRATION_COLORS
+
+
+def photo_boxes(
+    tree: etree._Element, part, slide_w: int, slide_h: int, illustrations: bool = False
+) -> list[Box]:
+    """Рамки фото на слайде: картинки и фигуры с заливкой-картинкой.
+
+    `illustrations` — считать местом под картинку и иллюстрации (слайд
+    содержания; на обложке и финале они — оформление).
+    """
     found: list[Box] = []
     for element, box, _ in iter_shapes(tree):
         if box is None:
@@ -89,6 +139,8 @@ def photo_boxes(tree: etree._Element, part, slide_w: int, slide_h: int) -> list[
             blob = part.related_part(rid).blob
         except (KeyError, AttributeError):
             continue
-        if is_photo(blob, box, slide_w, slide_h):
+        if is_photo(blob, box, slide_w, slide_h) or (
+            illustrations and is_illustration(blob, box, slide_w, slide_h)
+        ):
             found.append(box)
     return found

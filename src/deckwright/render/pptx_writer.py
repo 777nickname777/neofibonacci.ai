@@ -119,6 +119,28 @@ def _fill_text_frame(text_frame, element: Element, *, styled: bool) -> None:
             # строку. Одинарный интервал — это 1.2 кегля, ровно то, чем
             # фиттер мерит «влезает»: картинка обязана совпадать с моделью.
             target.line_spacing = 1.0
+    _flatten_hanging_indent(text_frame)
+
+
+_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+def _flatten_hanging_indent(text_frame) -> None:
+    """Висячий отступ без маркера — в ноль, у всех абзацев рамки.
+
+    Место финала `vk_tech` задаёт абзацу отступ маркера (`marL` 0.19″,
+    `indent` −0.19″) и тут же маркер снимает (`buNone`): первая строка
+    начинается от края, остальные — с отступом, и абзац выглядит кривым.
+    """
+    first = text_frame.paragraphs[0]._p.find(f"{_A}pPr")
+    if first is None or first.find(f"{_A}buNone") is None:
+        return
+    if int(first.get("indent", "0")) >= 0:
+        return
+    for paragraph in text_frame.paragraphs:
+        ppr = paragraph._p.get_or_add_pPr()
+        ppr.set("marL", "0")
+        ppr.set("indent", "0")
 
 
 def _placeholder_at(slide, box: Box):
@@ -421,6 +443,7 @@ def render_deck(
         _drop_unfilled_data_frames(slide, filled)
         _drop_donor_figures(slide, donor_numbers, filled)
         _drop_sibling_figures(slide, pattern, slide_ir)
+        _drop_drawn_chart(slide, pattern, slide_ir)
         # Панели обложки и финала вне ряда элементов — рамка «Название
         # проекта», плашка контактов — оформление: остаются и пустыми.
         # Пустые карточки ряда уходят, как на рабочем слайде.
@@ -864,8 +887,9 @@ def _drop_unused_repeater_items(
 # Шапка слайда тянется на столько ниже заголовка или подзаголовка.
 _HEADER_ZONE_EMU = 228_600  # 0.25″
 
-# Панель — залитая фигура заметного размера, но не фон всего слайда.
-_PANEL_MIN_SHARE = 0.01
+# Панель — залитая фигура заметного размера, но не фон всего слайда. Рамка
+# под фото автора на обложке `vk_tech` — 0.9 % слайда.
+_PANEL_MIN_SHARE = 0.005
 _PANEL_MAX_SHARE = 0.6
 # Какая доля нашего элемента должна лежать на панели, чтобы она считалась
 # занятой им.
@@ -1008,7 +1032,13 @@ def _drop_emptied_panels(
             _has_fill(element) or _has_outline(element)
         ):
             continue
-        if not any(_inside(text, box) for text in donor_text):
+        # Рамка подписи бывает шире своей плашки: «Вставить фото» на
+        # обложке `vk_tech` выступает за белый квадрат, и квадрат без
+        # фото оставался. Своя — если большая часть рамки на плашке.
+        if not any(
+            _inside(text, box) or _share_inside(text, box) >= _PANEL_USE_SHARE
+            for text in donor_text
+        ):
             continue
         if any(_share_inside(taken, box) >= _PANEL_USE_SHARE for taken in filled):
             continue
@@ -1137,6 +1167,57 @@ def _drop_sibling_figures(slide, pattern, slide_ir) -> int:
             element.getparent().remove(element)
             removed += 1
     return removed
+
+
+# Столбцов нарисованного графика — не меньше трёх; длины расходятся хотя бы
+# на треть: ряд одинаковых значков или кнопок — не график.
+_DRAWN_BARS_MIN = 3
+_DRAWN_SPREAD = 1.3
+
+
+def drawn_chart(pattern) -> list[Box]:
+    """Столбцы или полосы графика, нарисованного донором картинками.
+
+    Диаграмма Ганта `vk_tech` — пять полос-картинок одной толщины и разной
+    длины, столбчатая — двадцать столбцов одной ширины и разной высоты.
+    Это пример чужих данных, а не декор: признак — не меньше трёх мест под
+    картинку одной толщины (в пределах 10 %) и заметно разной длины.
+    """
+    if pattern is None:
+        return []
+    images = [slot.box for slot in pattern.slots if slot.role is SlotRole.IMAGE]
+    for across in (True, False):
+        bars = [box for box in images if (box.w > box.h) is across]
+        if len(bars) < _DRAWN_BARS_MIN:
+            continue
+        thick = [box.h if across else box.w for box in bars]
+        long = [box.w if across else box.h for box in bars]
+        if max(thick) <= 1.1 * min(thick) and max(long) >= _DRAWN_SPREAD * min(long):
+            return bars
+    return []
+
+
+def _drop_drawn_chart(slide, pattern, slide_ir) -> int:
+    """Убирает нарисованный график донора, если нашей картинки на нём нет.
+
+    Полосы диаграммы Ганта оставались на слайде «100 000 пользователей»
+    без подписей и данных: подписи стёрты, картинки — нет. Наш график
+    строится своим элементом, а полосы донора — чужие числа.
+    """
+    bars = drawn_chart(pattern)
+    ours = [
+        element.box for element in slide_ir.elements if element.kind is ElementKind.IMAGE
+    ]
+    removed = 0
+    for box in bars:
+        if any(_overlaps_box(box, taken) for taken in ours):
+            continue
+        removed += _remove_shape_at(slide, box)
+    return removed
+
+
+def _overlaps_box(a: Box, b: Box) -> bool:
+    return a.x < b.right and b.x < a.right and a.y < b.bottom and b.y < a.bottom
 
 
 def _similar_size(a: Box, b: Box) -> bool:

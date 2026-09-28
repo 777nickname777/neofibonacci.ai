@@ -30,6 +30,7 @@ from deckwright.schemas import (
     ContentPack,
     FixKind,
     Severity,
+    SlotRole,
 )
 
 CONFIG = "configs/config.yaml"
@@ -482,6 +483,21 @@ def test_duplicate_slides_are_caught(clean):
     ]
     found = content_checks.duplicate_slides(deck)
     assert any(i.check_id == "integrity.duplicate_slides" for i in found)
+
+
+def test_title_only_slide_is_caught(clean):
+    """Слайд, от которого остался заголовок, — ошибка, а не info заполненности.
+
+    Питч Fibonacci на сайте: шесть слайдов из одних заголовков прошли аудит,
+    потому что логотип и декор донора набирали заполненность.
+    """
+    deck = clean.deck.model_copy(deep=True)
+    assert not content_checks.title_only(deck)
+    victim = deck.slides[len(deck.slides) // 2]
+    victim.elements = [e for e in victim.elements if e.role is SlotRole.TITLE]
+    found = content_checks.title_only(deck)
+    assert [i.check_id for i in found] == ["density.title_only"]
+    assert found[0].slide_index == victim.index
 
 
 def test_text_overflow_is_caught(clean):

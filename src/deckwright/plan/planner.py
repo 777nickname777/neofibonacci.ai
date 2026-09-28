@@ -21,7 +21,15 @@ from pydantic import BaseModel, Field, model_validator
 from deckwright.config import agent_prompt
 from deckwright.llm.base import StructuredClient
 from deckwright.plan.budget import LengthBudget, compute_budget
-from deckwright.schemas import BlockKind, ContentPack, DeckPlan, PromptVersion, TemplateSpec
+from deckwright.schemas import (
+    BlockKind,
+    ContentBlock,
+    ContentPack,
+    DeckPlan,
+    PromptVersion,
+    SlideIntent,
+    TemplateSpec,
+)
 
 PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts"
 
@@ -165,7 +173,7 @@ def build_plan(
     )
     plan = client.complete(step=prompt.step, prompt=text, schema=_bounded(min_slides))
     plan = DeckPlan.model_validate(plan.model_dump())
-    return resolve_facts(resolve_quotes(plan, pack), pack), prompt, budget
+    return fill_or_drop(resolve_facts(resolve_quotes(plan, pack), pack), pack), prompt, budget
 
 
 def _bounded(min_slides: int) -> type[DeckPlan]:
@@ -220,17 +228,90 @@ _TEXT_BLOCKS = (BlockKind.PARAGRAPH, BlockKind.BULLETS, BlockKind.STEPS)
 
 
 def resolve_facts(plan: DeckPlan, pack: ContentPack) -> DeckPlan:
-    """Текстовый блок, где у модели есть только `fact_ids`, получает текст фактов.
+    """Блок, где у модели есть только ссылки на факты, получает текст фактов.
 
     Живой прогон pdf × vk_tech: у слайда-решения один абзац с `fact_ids` и
     без строк — слайд выходил пустым во всех трёх вариантах. Текст факта
     взят из входа и уже сверен, так что подставлять его безопасно.
+
+    Показатель с одними `fact_ids` (питч Fibonacci: «LTV в 4 раза выше CAC»,
+    «Конверсия 2 %» — сайт собрал их из одних заголовков) получает число
+    факта и подпись, а если фактов несколько — становится списком их текстов.
+    Ряд, которого нет в пакете (модель сослалась на факты как на ряды или
+    на выброшенный сверкой ряд), — тоже список фактов; сослаться не на что —
+    блок уходит, а не печатает на слайде идентификатор «s_market».
+    """
+    facts = {fact.id: fact for fact in pack.facts}
+    known_series = {item.id for item in pack.series}
+    plan = plan.model_copy(deep=True)
+    for slide in plan.slides:
+        kept = []
+        for block in slide.blocks:
+            if block.kind is BlockKind.SERIES and not any(
+                sid in known_series for sid in block.series_ids
+            ):
+                ids = [*block.fact_ids, *(sid for sid in block.series_ids if sid in facts)]
+                block = block.model_copy(
+                    update={"kind": BlockKind.BULLETS, "series_ids": [], "fact_ids": ids}
+                )
+            cited = [facts[fact_id] for fact_id in block.fact_ids if fact_id in facts]
+            if block.kind in _TEXT_BLOCKS and not block.items:
+                block.items = [fact.text for fact in cited]
+            elif block.kind is BlockKind.KPI and not block.items and not block.heading:
+                if len(cited) == 1 and cited[0].value is not None:
+                    fact = cited[0]
+                    block.heading = f"{fact.value:g} {fact.unit}".strip()
+                    block.items = [fact.text]
+                else:
+                    block = block.model_copy(
+                        update={"kind": BlockKind.BULLETS, "items": [f.text for f in cited]}
+                    )
+            if block.items or block.heading or block.series_ids or block.table or (
+                block.kind is BlockKind.IMAGE
+            ):
+                kept.append(block)
+        slide.blocks = kept
+    return plan
+
+
+# Слайды, которые законно состоят из одного заголовка.
+_BARE_INTENTS = frozenset({SlideIntent.TITLE, SlideIntent.SECTION, SlideIntent.CLOSING})
+
+
+def fill_or_drop(plan: DeckPlan, pack: ContentPack) -> DeckPlan:
+    """Слайд содержания без блоков не уходит в колоду: заполнить или убрать.
+
+    После `resolve_facts` у слайда могут не остаться блоки — модель
+    сослалась на ряд, которого нет, и ни на один факт. Такой слайд — один
+    заголовок. Числа, вынесенные на слайд (`figures`), ссылаются на факты:
+    их тексты и становятся списком. Сослаться не на что — слайд уходит, а
+    номера остальных сдвигаются.
     """
     facts = {fact.id: fact for fact in pack.facts}
     plan = plan.model_copy(deep=True)
+    kept = []
     for slide in plan.slides:
-        for block in slide.blocks:
-            if block.kind not in _TEXT_BLOCKS or block.items:
+        if not slide.blocks and slide.intent not in _BARE_INTENTS:
+            cited = list(
+                dict.fromkeys(
+                    fact_id
+                    for figure in slide.figures
+                    for fact_id in figure.fact_ids
+                    if fact_id in facts
+                )
+            )
+            if not cited:
                 continue
-            block.items = [facts[fact_id].text for fact_id in block.fact_ids if fact_id in facts]
+            slide.blocks = [
+                ContentBlock(
+                    id=f"s{slide.index}_filled",
+                    kind=BlockKind.BULLETS,
+                    items=[facts[fact_id].text for fact_id in cited],
+                    fact_ids=cited,
+                )
+            ]
+        kept.append(slide)
+    for number, slide in enumerate(kept, start=1):
+        slide.index = number
+    plan.slides = kept
     return plan
