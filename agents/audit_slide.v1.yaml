@@ -1,0 +1,19 @@
+# Агент аудита по картинке: слайд (PNG при audit.contextual_dpi) → ответы
+# на контекстные вопросы Приложения 1 ТЗ, по одному вызову на слайд варианта.
+name: audit_slide
+version: "1"
+step: audit_slide
+description: >
+  Отвечает по картинке слайда на вопросы, помеченные в config.yaml как
+  image: соответствие тела заголовку, наполненность, уместность визуалов,
+  остатки промпта, строки таблицы.
+endpoint: vlm
+model: ${VLM_MODEL}
+prompt: audit_slide.v3
+params:
+  temperature: 0.0
+  max_tokens: 1500
+  enable_thinking: false
+limits:
+  timeout_seconds: 120
+  max_retries: 2

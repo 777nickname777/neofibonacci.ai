@@ -50,6 +50,7 @@ from deckwright.render.pdf import pptx_to_pdf
 from deckwright.render.png import pdf_to_png
 from deckwright.render.pptx_writer import render_deck, slide_is_single_image
 from deckwright.schemas import (
+    AgentVersion,
     AuditReport,
     CheckKind,
     ContentPack,
@@ -180,6 +181,29 @@ def plan_limits(spec: TemplateSpec, cfg: Config) -> tuple[tuple[str, int, int], 
         for kind, curve in capacity.items()
         for point in curve
     ) + tuple(bookend_limits(spec))
+
+
+def _agent_versions(
+    cfg: Config, client: StructuredClient, vlm_client: StructuredClient | None
+) -> list[AgentVersion]:
+    """Агенты прогона и модель, в которую каждый из них ходил (A19)."""
+    versions = []
+    for agent in cfg.agents:
+        endpoint = cfg.llm if agent.endpoint == "llm" else cfg.vlm
+        used = client if agent.endpoint == "llm" else vlm_client
+        mocked = used is None or used.mocked
+        versions.append(
+            AgentVersion(
+                name=agent.name,
+                version=agent.version,
+                sha256=agent.sha256,
+                step=agent.step,
+                endpoint=agent.endpoint,
+                model="recorded" if mocked else (agent.model or endpoint.model),
+                prompt=agent.prompt,
+            )
+        )
+    return versions
 
 
 def _step_params(model_cfg, steps: tuple[str, ...]) -> dict[str, dict[str, object]]:
@@ -757,6 +781,7 @@ def lay_out_variant(
             f"пункт {budget.bullet_chars} симв, до {budget.max_bullets} пунктов"
         )
     manifest.prompts.append(prompt.as_manifest_entry())
+    manifest.agents = _agent_versions(cfg, client, vlm_client)
     manifest.models.append(
         ModelUsage(
             role="llm",

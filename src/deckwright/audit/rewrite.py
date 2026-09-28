@@ -33,6 +33,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
+from deckwright.config import agent_prompt
 from deckwright.plan.budget import LengthBudget
 from deckwright.plan.figures import numbers_in
 from deckwright.plan.planner import Prompt, load_prompt
@@ -228,7 +229,7 @@ def rewrite(
     if not targets:
         return RewriteOutcome(plan=plan)
 
-    prompt = load_prompt("rewrite_slide.v1", prompts_dir)
+    prompt = load_prompt(agent_prompt("shorten_text"), prompts_dir)
     limits = length_limits or (
         budget.as_prompt_lines() if budget is not None else "(ограничений не задано)"
     )

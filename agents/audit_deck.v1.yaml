@@ -1,0 +1,18 @@
+# Агент текстового аудита: текст SlideIR всей колоды → ответы на вопросы,
+# помеченные в config.yaml как text. Один вызов на колоду, не на вариант.
+name: audit_deck
+version: "1"
+step: audit_deck
+description: >
+  Проверяет по тексту колоды заголовки-выводы, одну мысль слайда,
+  происхождение чисел, опечатки, единый язык и связность соседних слайдов.
+endpoint: vlm
+model: ${VLM_MODEL}
+prompt: audit_deck.v1
+params:
+  temperature: 0.0
+  max_tokens: 1500
+  enable_thinking: false
+limits:
+  timeout_seconds: 120
+  max_retries: 2

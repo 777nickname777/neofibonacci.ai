@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from deckwright.config import agent_prompt
 from deckwright.llm.base import StructuredClient
 from deckwright.plan.budget import LengthBudget, compute_budget
 from deckwright.schemas import BlockKind, ContentPack, DeckPlan, PromptVersion, TemplateSpec
@@ -128,7 +129,7 @@ def build_plan(
     шаблона модель работает по одним порогам плотности из ТЗ — план тогда
     может не влезть, и разбираться с этим придётся фиттеру.
     """
-    prompt = load_prompt("plan_deck.v6", prompts_dir)
+    prompt = load_prompt(agent_prompt("plan_deck"), prompts_dir)
     budget = (
         compute_budget(
             spec, max_bullets, max_words_per_bullet, substitution_slack=substitution_slack

@@ -27,6 +27,24 @@ class PromptVersion(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class AgentVersion(BaseModel):
+    """Версия агента (`agents/<имя>.vN.yaml`), с которой шёл прогон.
+
+    Хэш — файла агента: правка параметров без смены версии видна по нему.
+    Модель — та, в которую ушли запросы: имя из окружения или «recorded».
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    step: str
+    endpoint: str = Field(pattern=r"^(llm|vlm)$")
+    model: str
+    prompt: str
+
+
 class ModelUsage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -161,6 +179,7 @@ class RunManifest(BaseModel):
     variants: list[str] = Field(default_factory=list)
 
     prompts: list[PromptVersion] = Field(default_factory=list)
+    agents: list[AgentVersion] = Field(default_factory=list)
     models: list[ModelUsage] = Field(default_factory=list)
 
     timings: list[StageTiming] = Field(default_factory=list)

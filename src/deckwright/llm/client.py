@@ -172,6 +172,11 @@ class LiveClient:
         # показать, что именно вернул endpoint, а не пересказ.
         self.last_raw = ""
 
+    def _attempts(self, step: str) -> int:
+        """Попыток на шаг: предел агента, иначе endpoint'а."""
+        retries = self._cfg.step(step).max_retries
+        return (self._cfg.max_retries if retries is None else retries) + 1
+
     def _extra_body(self, step: str) -> dict[str, object]:
         params = self._cfg.step(step)
         extra: dict[str, object] = {"enable_thinking": params.enable_thinking}
@@ -225,12 +230,13 @@ class LiveClient:
         started = time.monotonic()
         try:
             response = self._client.chat.completions.create(
-                model=self._cfg.model,
+                model=params.model or self._cfg.model,
                 messages=messages,
                 temperature=params.temperature,
                 max_tokens=params.max_tokens,
                 response_format={"type": "json_object"},
                 extra_body=self._extra_body(step),
+                timeout=params.timeout_seconds or self._cfg.timeout_seconds,
             )
         except RateLimitError:
             # SDK уже исчерпал свои повторы; отмечаем и передаём выше.
@@ -243,12 +249,13 @@ class LiveClient:
             # Провайдер не знает параметр: забываем его и пробуем ещё раз.
             self.dropped_params.add(rejected)
             response = self._client.chat.completions.create(
-                model=self._cfg.model,
+                model=params.model or self._cfg.model,
                 messages=messages,
                 temperature=params.temperature,
                 max_tokens=params.max_tokens,
                 response_format={"type": "json_object"},
                 extra_body=self._extra_body(step),
+                timeout=params.timeout_seconds or self._cfg.timeout_seconds,
             )
         self.calls += 1
         self.slowest_call_seconds = max(
@@ -340,7 +347,8 @@ class LiveClient:
         messages = self._message(prompt, schema, images)
         estimated = self._estimate(step, messages, images)
         last_error = ""
-        for _ in range(self._cfg.max_retries + 1):
+        attempts = self._attempts(step)
+        for _ in range(attempts):
             raw = self._ask_hedged(step, messages, estimated)
             try:
                 return schema.model_validate_json(strip_wrapping(raw))
@@ -363,5 +371,5 @@ class LiveClient:
                 ]
         raise StructuredError(
             f"шаг {step}: модель не отдала валидный {schema.__name__} "
-            f"за {self._cfg.max_retries + 1} попыток. Последние ошибки:\n{last_error}"
+            f"за {attempts} попыток. Последние ошибки:\n{last_error}"
         )

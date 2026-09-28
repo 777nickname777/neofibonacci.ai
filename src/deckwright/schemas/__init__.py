@@ -52,6 +52,7 @@ from deckwright.schemas.issue import (
     Severity,
 )
 from deckwright.schemas.manifest import (
+    AgentVersion,
     FixIteration,
     FontSubstitution,
     ModelUsage,
@@ -93,6 +94,7 @@ from deckwright.schemas.template_spec import (
 __all__ = [
     "EMU_PER_INCH",
     "EMU_PER_POINT",
+    "AgentVersion",
     "Align",
     "AuditReport",
     "BlockKind",

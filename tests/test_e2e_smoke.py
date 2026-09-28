@@ -117,6 +117,11 @@ def test_manifest_records_what_makes_the_run_reproducible(result):
     assert manifest.template_sha256 == result.spec.template_sha256
     assert manifest.prompts, "версии промптов не записаны"
     assert all(p.sha256 for p in manifest.prompts)
+    # Версии агентов: какой шаг, какой моделью и каким промптом (A19).
+    agents = {agent.step: agent for agent in manifest.agents}
+    assert {"ingest_content", "plan_deck", "audit_slide", "audit_deck"} <= set(agents)
+    assert agents["plan_deck"].prompt in {p.name + ".v" + p.version for p in manifest.prompts}
+    assert all(agent.model == "recorded" for agent in manifest.agents)
     assert manifest.models and manifest.models[0].mocked is True
     stages = {t.stage for t in manifest.timings}
     assert {"parse", "plan", "layout", "render_pptx", "render_pdf"} <= stages

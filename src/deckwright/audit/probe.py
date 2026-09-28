@@ -27,6 +27,7 @@ from pathlib import Path
 
 from deckwright.audit.contextual.runner import SlideAnswers, _questions, _slide_body
 from deckwright.audit.spoil import Spoilage
+from deckwright.config import agent_prompt
 from deckwright.plan.planner import load_prompt
 from deckwright.schemas import DeckIR, DeckPlan
 
@@ -148,7 +149,7 @@ def run(
     prompts_dir: str | Path | None = None,
 ) -> ProbeResult:
     """Прогоняет картиночный аудит и возвращает замеры."""
-    prompt = load_prompt("audit_slide.v3", prompts_dir)
+    prompt = load_prompt(agent_prompt("audit_slide"), prompts_dir)
     questions = _questions(check_ids)
     result = ProbeResult()
 
@@ -179,7 +180,7 @@ def run_text_pass(
     """
     from deckwright.audit.contextual.runner import DeckAnswers
 
-    prompt = load_prompt("audit_deck.v1", prompts_dir)
+    prompt = load_prompt(agent_prompt("audit_deck"), prompts_dir)
     slides = "\n\n".join(
         f"[{slide.index}] {slide.takeaway_title}\n"
         + "\n".join(f"  - {item}" for block in slide.blocks for item in block.items)

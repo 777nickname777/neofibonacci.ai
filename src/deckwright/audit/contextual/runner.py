@@ -30,6 +30,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from deckwright.audit.registry import check
+from deckwright.config import agent_prompt
 from deckwright.plan.planner import load_prompt
 from deckwright.schemas import (
     Box,
@@ -212,7 +213,7 @@ def _image_pass(
     shared: SharedAudit | None = None,
     scale: float = 1.0,
 ) -> tuple[list[Issue], list[str]]:
-    prompt = load_prompt("audit_slide.v3", prompts_dir)
+    prompt = load_prompt(agent_prompt("audit_slide"), prompts_dir)
     questions = _questions(check_ids)
     # Титул и разделитель по замыслу состоят из заголовка: вопрос «есть ли
     # на слайде содержание» для них ложный. Живой прогон 4×4: модель
@@ -282,7 +283,7 @@ def _text_pass(
     check_ids: list[str],
     prompts_dir: str | Path | None,
 ) -> tuple[list[Issue], str]:
-    prompt = load_prompt("audit_deck.v1", prompts_dir)
+    prompt = load_prompt(agent_prompt("audit_deck"), prompts_dir)
     slides = "\n\n".join(
         f"[{slide.index}] {slide.takeaway_title}\n"
         + "\n".join(f"  - {item}" for block in slide.blocks for item in block.items)
