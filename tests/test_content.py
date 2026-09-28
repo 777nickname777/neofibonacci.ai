@@ -130,6 +130,32 @@ def test_label_digit_is_not_a_thousands_group():
     assert source_numbers("бюджет 1 200 000 руб") == {1200000.0}
 
 
+def test_series_whose_values_repeat_labels_is_dropped():
+    """Ряд 2023…2026 со значениями 2023…2026 — подписи, а не данные.
+
+    Питч Fibonacci: модель собрала его из шапки таблицы дизайн-PDF, и на
+    слайде «Выручка» стояли столбцы высотой в год.
+    """
+    pdf = Path(__file__).parent / "fixtures" / "fibonacci_pitch" / "fibonacci_ai.pdf"
+    years = [{"label": str(year), "value": year} for year in (2023, 2024, 2025, 2026)]
+    client = StubClient(
+        {
+            "topic": "Fibonacci AI",
+            "purpose": "product",
+            "facts": [],
+            "series": [
+                {"name": "Динамика ключевых показателей", "doc_id": "d1", "points": years},
+                {"name": "Распределение инвестиций", "doc_id": "d1", "unit": "%", "points": [
+                    {"label": "разработка", "value": 30}, {"label": "маркетинг", "value": 70}]},
+            ],
+            "quotes": [],
+        }
+    )
+    result = ingest(IngestInput(files=[pdf]), client)
+    assert [series.name for series in result.pack.series] == ["Распределение инвестиций"]
+    assert any("повторяют подписи" in warning for warning in result.warnings)
+
+
 def test_invented_numbers_are_dropped_with_their_facts(inputs):
     """Модель вернула факт с числом, которого во входе нет: он не доходит до пакета."""
     client = StubClient(
@@ -348,4 +374,44 @@ def test_text_block_with_only_fact_ids_gets_fact_text():
     )
     blocks = resolve_facts(plan, pack).slides[0].blocks
     assert blocks[0].items == ["Энергия снизилась на 23 %"]
-    assert blocks[1].items == []
+    # Показатель тоже: KPI из одних `fact_ids` на сайте давал слайд из одного
+    # заголовка («Конверсия 2 %», питч Fibonacci).
+    assert blocks[1].items == ["Энергия снизилась на 23 %"]
+
+
+def test_slide_without_blocks_is_filled_from_its_figures_or_dropped():
+    """Слайд, у которого после сверки не осталось блоков, — не один заголовок.
+
+    Ряд по несуществующему id снимается; слайд с числами (`figures`) получает
+    список их фактов, слайд без ссылок уходит, номера сдвигаются.
+    """
+    from deckwright.plan.planner import fill_or_drop, resolve_facts
+    from deckwright.schemas import DeckPlan
+
+    pack = ContentPack.model_validate(
+        {
+            "brief": {"topic": "Питч", "purpose": "product"},
+            "documents": [{"id": "d1", "name": "p.pdf", "kind": "pdf"}],
+            "facts": [
+                {"id": "f1", "text": "Рынок EdTech — 630 млн рублей", "source_doc_id": "d1"},
+            ],
+        }
+    )
+    plan = DeckPlan.model_validate(
+        {
+            "title": "Питч", "purpose": "product",
+            "slides": [
+                {"index": 1, "intent": "evidence", "takeaway_title": "Рынок растёт",
+                 "blocks": [{"id": "b1", "kind": "series", "series_ids": ["s_market"]}],
+                 "figures": [{"text": "630 млн", "kind": "cited", "fact_ids": ["f1"]}]},
+                {"index": 2, "intent": "evidence", "takeaway_title": "LTV выше CAC",
+                 "blocks": [{"id": "b2", "kind": "series", "series_ids": ["s_nope"]}]},
+                {"index": 3, "intent": "ask", "takeaway_title": "Инвестируйте",
+                 "blocks": [{"id": "b3", "kind": "paragraph", "items": ["Раунд pre-seed"]}]},
+            ],
+        }
+    )
+    slides = fill_or_drop(resolve_facts(plan, pack), pack).slides
+    assert [slide.takeaway_title for slide in slides] == ["Рынок растёт", "Инвестируйте"]
+    assert [slide.index for slide in slides] == [1, 2]
+    assert slides[0].blocks[0].items == ["Рынок EdTech — 630 млн рублей"]

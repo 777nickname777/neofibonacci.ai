@@ -689,6 +689,10 @@ def _blocks_fit(
     return True
 
 
+# Доля типичного кегля роли, мельче которой текст уже не читается с экрана.
+_LEGIBLE_SHARE = 0.6
+
+
 def pick_pattern(
     spec: TemplateSpec,
     plan_slide: SlidePlan,
@@ -758,6 +762,13 @@ def pick_pattern(
             )
         return small[pattern.id]
 
+    avoided_looks = {_look(pattern) for pattern in spec.patterns if pattern.id in avoid}
+    # Ступень между «типичным кеглем» и «хоть как-то»: не мельче трёх пятых
+    # типичного. Без неё 16 pt и 8 pt были равны: абзац о команде питча
+    # Fibonacci уходил в подпись тёмного слайда кеглем 8 при типичных 18, а
+    # пункты о выручке — в подписи под местом показателя.
+    readable = {role: size * _LEGIBLE_SHARE for role, size in typical.items()}
+
     def best_of(candidates: list[Pattern], strict_ids: set[str] | None = None) -> Pattern:
         """Порядок решений: влезает текст → ещё не было в колоде → вариант.
 
@@ -810,6 +821,10 @@ def pick_pattern(
                 _figure_unsplit(pattern, spec, plan_slide, strategy),
                 figure_small(pattern),
                 pattern.id in avoid,
+                # Похожая на чужую — тоже чужая, если есть куда уйти: на питче
+                # Fibonacci `vk_tech` четыре разные сетки белых карточек
+                # (14, 17, 24, 25) делали dense, balanced и airy одной колодой.
+                _look(pattern) in avoided_looks,
                 # Сколько раз колода уже брала её — меньше лучше, а не только
                 # «брала или нет»: иначе при всех взятых выигрывала первая.
                 used[pattern.id] if isinstance(used, Counter) else pattern.id in used,
@@ -866,7 +881,7 @@ def pick_pattern(
     has_series = any(
         block.kind in (BlockKind.SERIES, BlockKind.TABLE) for block in plan_slide.blocks
     )
-    for tier in (typical, None):
+    for tier in (typical, readable, None):
         for spread in (True, False):
             roomy = fitting(
                 [
@@ -1203,7 +1218,9 @@ def _spread(
                 members.append(slot)
             if len(members) < 2:
                 continue
-            members += _extra_cards(repeater, item_slot, members, free, taken, block, reserve)
+            members = _reading_order(
+                members + _extra_cards(repeater, item_slot, members, free, taken, block, reserve)
+            )
             covered = min(len(block.items), len(members))
             options.append(((covered, item_slot.box.area), repeater, members))
             break
@@ -1216,7 +1233,41 @@ def _spread(
     free[:] = [
         slot for slot in free if not slot.id.startswith(prefix) and slot.id not in chosen
     ]
-    return list(zip(members[:count], _chunks(list(block.items), count), strict=True))
+    seats = [
+        slot if slot.id.startswith(prefix) else _with_head(slot, free, taken)
+        for slot in members[:count]
+    ]
+    return list(zip(seats, _chunks(list(block.items), count), strict=True))
+
+
+def _with_head(slot, free: list, taken: list[Box]):
+    """Отдельная карточка ряда — вместе с местом шапки над текстом.
+
+    У карточек повторителя текст растёт на место подписи над ним
+    (`_absorb`); у отдельной карточки того же ряда шапка — отдельное место
+    числа или подписи. Без неё пункт отдельной карточки начинался на строку
+    ниже соседних.
+    """
+    heads = [
+        other
+        for other in free
+        if other.role in (SlotRole.CAPTION, SlotRole.KPI_VALUE)
+        and other.box.bottom <= slot.box.y + slot.box.h // 10
+        and _stacked(other.box, slot.box)
+        and _gap(other.box, slot.box) <= other.box.h
+        and not any(_overlaps(other.box, box) for box in taken)
+    ]
+    if not heads:
+        return slot
+    head = max(heads, key=lambda other: other.box.y)
+    free[:] = [other for other in free if other.id != head.id]
+    return slot.model_copy(
+        update={
+            "box": slot.box.model_copy(
+                update={"y": head.box.y, "h": slot.box.bottom - head.box.y}
+            )
+        }
+    )
 
 
 def _extra_cards(
@@ -1241,18 +1292,19 @@ def _extra_cards(
         and slot.role in _CARD_TEXT_ROLES
         and not any(_overlaps(slot.box, box) for box in taken)
     ]
-    wanted = min(len(block.items) - len(members), len(singles) - reserve)
-    if wanted <= 0:
+    wanted = min(len(block.items), len(singles) - reserve)
+    if wanted <= 0 or (len(block.items) <= len(members) and not _ahead(singles, members)):
         return []
-    first = members[0].box
+    first = min((member.box for member in members), key=lambda box: box.y)
     extra = [
         slot
         for slot in free
         if not slot.id.startswith(prefix)
         and slot.role is item_slot.role
-        and slot.box.w >= first.w
+        # Ширины одинаковых карточек донора расходятся на десятки EMU.
+        and slot.box.w >= first.w * 0.95
         and slot.box.area >= first.area // 2
-        and slot.box.y >= first.y
+        and slot.box.y >= first.y - first.h // 2
         and not any(_overlaps(slot.box, box) for box in taken)
         and not any(_overlaps(slot.box, member.box) for member in members)
     ]
@@ -1268,7 +1320,39 @@ def _extra_cards(
             for other in chosen
         ):
             chosen.append(slot)
-    return sorted(chosen, key=lambda slot: (slot.box.y, slot.box.x))
+    return chosen
+
+
+def _ahead(singles: list, members: list) -> bool:
+    """Есть ли отдельная карточка раньше карточек повторителя по порядку чтения.
+
+    Шесть мест `vk_tech` «ИИ создаёт»: левая верхняя карточка — отдельные
+    места, повторитель начинается с левой нижней. Три пункта садились в
+    нижнюю левую и две верхние правее, первая карточка оставалась пустой.
+    """
+    order = _reading_order(members)
+    first = order[0].box
+    return any(
+        _reading_order([slot, order[0]])[0] is slot
+        and slot.box.y + slot.box.h > first.y
+        and slot.box.w >= first.w * 0.95
+        for slot in singles
+    )
+
+
+def _reading_order(slots: list) -> list:
+    """Места по порядку чтения: ряд за рядом, в ряду — слева направо.
+
+    Ряд — места, чьи верхние края расходятся меньше чем на полвысоты: у
+    карточек одного ряда подпись и текст сдвинуты на строку.
+    """
+    rows: list[list] = []
+    for slot in sorted(slots, key=lambda slot: slot.box.y):
+        if rows and slot.box.y - rows[-1][0].box.y < rows[-1][0].box.h // 2:
+            rows[-1].append(slot)
+        else:
+            rows.append([slot])
+    return [slot for row in rows for slot in sorted(row, key=lambda slot: slot.box.x)]
 
 
 def _text_after(blocks: list, block, strategy: Strategy) -> int:
@@ -3601,6 +3685,27 @@ def _slides_for(
     if len(remaining) >= len(issues):
         return [slide], issues
     return halves, remaining
+
+
+_LOOK_TOLERANCE = 91_440  # 0.1″
+
+
+def _look(pattern: Pattern) -> tuple:
+    """Как композиция выглядит издали: класс, фон, расклад карточек, фото.
+
+    Расклад — строка, колонка или сетка элементов самого большого
+    повторителя: четыре карточки в строку и четыре строки списка справа
+    от заголовка — разные слайды, хотя обе — «сетка» с повторителем.
+    """
+    arrangement = ""
+    if pattern.repeaters:
+        repeater = max(pattern.repeaters, key=lambda r: r.observed_count)
+        offsets = repeater.member_offsets[: repeater.observed_count]
+        # Сдвиг до 0.1″ — тот же ряд: у донора карточки стоят «на глаз».
+        rows = len({round(dy / _LOOK_TOLERANCE) for _, dy in offsets})
+        columns = len({round(dx / _LOOK_TOLERANCE) for dx, _ in offsets})
+        arrangement = "row" if rows == 1 else "column" if columns == 1 else "grid"
+    return (pattern.pattern_class, pattern.is_dark, arrangement, bool(pattern.photo_slots))
 
 
 def _roomier(

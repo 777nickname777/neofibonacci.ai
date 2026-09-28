@@ -82,6 +82,7 @@
 |---|---|---|---|
 | `density.too_many_bullets` | warning | пунктов больше порога Приложения 1 | `assisted` |
 | `density.bullet_too_long` | warning | пункт длиннее порога по числу слов | `assisted` |
+| `density.title_only` | error | слайд содержания — один заголовок (по `SlideIR`) | `none` |
 | `density.slide_too_empty` | info | слайд заполнен меньше порога | `none` |
 
 Заполненность считается по **собранному `.pptx`**, а не по `SlideIR`: после

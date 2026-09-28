@@ -18,8 +18,10 @@ from deckwright.schemas import (
     DeckPlan,
     FixKind,
     Issue,
+    PatternClass,
     ProposedFix,
     SlideIR,
+    SlotRole,
 )
 
 # Доля площади слайда, ниже которой он считается пустоватым. Порог
@@ -87,6 +89,58 @@ def density(
                 )
             )
     return found
+
+
+def title_only(deck: DeckIR, spec=None) -> list[Issue]:
+    """Слайд содержания, на котором кроме заголовка ничего нет.
+
+    Заполненность (`fill_ratio`) считает все фигуры слайда, и логотип,
+    линия и картинка донора её набирают: шесть слайдов питча Fibonacci
+    из одних заголовков («Рынок растёт», «LTV в 4 раза выше CAC») прошли
+    с находкой уровня info. Здесь — по `SlideIR`: есть ли у слайда хоть
+    один элемент с текстом, график или таблица, кроме заголовка и
+    подзаголовка. Обложка и финал — не содержание, их не проверяем.
+    """
+    found: list[Issue] = []
+    bookends = spec.bookend_ids if spec is not None else set()
+    # Раздел — заголовок по замыслу: разделитель без содержания не потеря.
+    if spec is not None:
+        bookends |= {
+            pattern.id
+            for pattern in spec.patterns
+            if pattern.pattern_class in (PatternClass.TITLE, PatternClass.SECTION)
+        }
+    last = len(deck.slides)
+    for slide in deck.slides:
+        if slide.pattern_id in bookends or (not bookends and slide.index in (1, last)):
+            continue
+        content = [
+            element
+            for element in slide.all_elements()
+            if element.role not in _HEADER_ROLES
+            and (
+                element.chart is not None
+                or element.table is not None
+                or (
+                    element.text is not None
+                    and any(p.text.strip() for p in element.text.paragraphs)
+                )
+            )
+        ]
+        if not content:
+            found.append(
+                _issue(
+                    "density.title_only",
+                    slide.index,
+                    "на слайде только заголовок: содержание слайда потерялось",
+                )
+            )
+    return found
+
+
+_HEADER_ROLES = frozenset(
+    {SlotRole.TITLE, SlotRole.SUBTITLE, SlotRole.FOOTER, SlotRole.SLIDE_NUMBER}
+)
 
 
 def fill_ratio(
@@ -366,7 +420,7 @@ def undeclared_numbers(plan: DeckPlan, pack) -> list[Issue]:
     return found
 
 
-def donor_photos(pptx_path: str | Path, deck: DeckIR) -> list[Issue]:
+def donor_photos(pptx_path: str | Path, deck: DeckIR, spec=None) -> list[Issue]:
     """Фото на собранном слайде — всегда фото донора.
 
     Колода фото не создаёт (генерации картинок нет), поэтому любое фото в
@@ -384,7 +438,11 @@ def donor_photos(pptx_path: str | Path, deck: DeckIR) -> list[Issue]:
     presentation = Presentation(str(pptx_path))
     width, height = presentation.slide_width, presentation.slide_height
     for slide_ir, slide in zip(deck.slides, presentation.slides, strict=False):
-        photos = photo_boxes(slide.shapes._spTree, slide.part, width, height)
+        # На обложке и финале иллюстрации — оформление шаблона.
+        bookend = spec is not None and slide_ir.pattern_id in spec.bookend_ids
+        photos = photo_boxes(
+            slide.shapes._spTree, slide.part, width, height, illustrations=not bookend
+        )
         if photos:
             found.append(
                 _issue(
@@ -443,6 +501,7 @@ def run(
     found: list[Issue] = []
     for slide in deck.slides:
         found.extend(density(slide, max_bullets, max_words, min_fill))
+    found.extend(title_only(deck, spec))
     found.extend(duplicate_slides(deck))
     found.extend(figures(plan, pack))
     found.extend(undeclared_numbers(plan, pack))
@@ -451,5 +510,5 @@ def run(
         found.extend(package(pptx_path))
         found.extend(donor_data(pptx_path, deck, spec))
         found.extend(donor_background(pptx_path, deck, spec))
-        found.extend(donor_photos(pptx_path, deck))
+        found.extend(donor_photos(pptx_path, deck, spec))
     return found

@@ -238,6 +238,15 @@ def to_pack(
                 f"ряд «{item.name}» отброшен — значений {_numbers(invented)} во входе нет"
             )
             continue
+        # Подписи вместо данных: из таблицы дизайн-PDF питча Fibonacci модель
+        # собрала ряд 2023…2026 со значениями 2023…2026 — столбцы высотой в
+        # год. Каждое значение есть во входе, сверка чисел его пропускала.
+        if len(item.points) > 1 and all(
+            p.value in source_numbers(p.label) for p in item.points
+        ):
+            dropped["series"] += 1
+            warnings.append(f"ряд «{item.name}» отброшен — значения повторяют подписи")
+            continue
         series.append(
             Series(
                 id=f"s{len(series) + 1}",

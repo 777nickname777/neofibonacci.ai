@@ -176,6 +176,12 @@ CHECKS: tuple[Check, ...] = (
         FixKind.ASSISTED,
     ),
     _det(
+        "density.title_only",
+        IssueCategory.DENSITY,
+        Severity.ERROR,
+        "Слайд содержания — один заголовок: содержание потерялось",
+    ),
+    _det(
         "density.slide_too_empty",
         IssueCategory.DENSITY,
         Severity.INFO,

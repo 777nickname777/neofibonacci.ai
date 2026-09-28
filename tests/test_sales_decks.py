@@ -353,12 +353,17 @@ def test_photo_slots_are_read_from_pictures_not_names(photo_template):
 
 
 def test_photo_slots_are_empty_on_templates_with_brand_art():
-    """3D-шар `vk_tech`, линии `vk_workspace`, маршрут бланка — не фото."""
-    for name in ("data/templates/vk_tech.pptx", "data/holdout/dorozhnaya_karta.pptx"):
+    """3D-шар обложки `vk_tech`, линии `vk_workspace`, маршрут бланка — не фото."""
+    for name in ("data/templates/vk_workspace.pptx", "data/holdout/dorozhnaya_karta.pptx"):
         path = ROOT / name
         if not path.exists():
             continue
         assert not any(p.photo_slots for p in parse_template(path).patterns), name
+    path = ROOT / "data/templates/vk_tech.pptx"
+    if path.exists():
+        spec = parse_template(path)
+        bookends = [p for p in spec.patterns if p.id in spec.bookend_ids]
+        assert bookends and not any(p.photo_slots for p in bookends)
 
 
 @pytest.mark.parametrize("variant", VARIANTS)

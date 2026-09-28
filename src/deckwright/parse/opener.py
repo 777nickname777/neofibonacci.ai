@@ -600,7 +600,9 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                     ],
                     "figure_pictures": _figure_pictures(tree),
                     "background": own_bg,
-                    "photo_slots": photo_boxes(tree, slide.part, slide_w, slide_h),
+                    "photo_slots": photo_boxes(
+                        tree, slide.part, slide_w, slide_h, illustrations=True
+                    ),
                     "background_signature": tokens_mod.background_signature(
                         bg_node, slide.part
                     ),
