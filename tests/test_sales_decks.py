@@ -322,9 +322,25 @@ def test_cut_off_plan_is_an_invalid_answer():
     plan = json.loads((SALES / "recorded" / "plan_deck.json").read_text("utf-8"))
     schema = _bounded(10)
     assert len(schema.model_validate(plan).slides) == 13
-    plan["slides"] = plan["slides"][:2]
-    with pytest.raises(ValidationError, match="план оборван"):
-        schema.model_validate(plan)
+    for cut in (2, 5, 9):
+        short = {**plan, "slides": plan["slides"][:cut]}
+        with pytest.raises(ValidationError, match="план оборван"):
+            schema.model_validate(short)
+
+
+def test_percent_from_a_share_formula_is_not_wrong():
+    """«65%» из 30.7 / 47.3 = 0.649 — та же величина в процентах (run 33)."""
+    from deckwright.plan.figures import verify
+    from deckwright.schemas import Figure, FigureKind
+
+    pack = _pack().model_copy(deep=True)
+    pack.facts[0].value, pack.facts[1].value = 30.7, 47.3
+    ids = [pack.facts[0].id, pack.facts[1].id]
+    share = Figure(text="65%", kind=FigureKind.DERIVED, fact_ids=ids,
+                   formula=f"{ids[0]} / {ids[1]}")
+    assert verify(share, pack) is None
+    wrong = share.model_copy(update={"text": "75%"})
+    assert verify(wrong, pack) is not None
 
 
 # ── 7. Фото донора — место под картинку, а не содержание ────────────────────

@@ -161,6 +161,11 @@ def verify(figure: Figure, pack: ContentPack) -> str | None:
     except FormulaError as exc:
         return f"число {figure.text!r}: {exc}"
 
+    # Процент по формуле-доле: «65%» из 30.7 / 47.3 = 0.649 — та же величина,
+    # записанная в процентах. Живой прогон sales × vk_tech (run 33) заводил на
+    # этом ошибку во всех трёх вариантах.
+    if "%" in figure.text and abs(computed) <= 1:
+        computed *= 100
     if abs(written - computed) > max(abs(computed) * TOLERANCE, 0.05):
         return (
             f"число {figure.text!r} не сходится с формулой {figure.formula}: "
