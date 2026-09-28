@@ -10,6 +10,8 @@
 - `json` — выгрузка продукта в чужой структуре: вложенные объекты, списки;
 - `observability` — контент датасета (платформа наблюдаемости) в нашей
   схеме контент-пакета: разбор моделью не нужен;
+- `pitch` — реальный питч стартапа (PDF из Google Slides) и бриф в одну
+  фразу: TAM/SAM/SOM, юнит-экономика, таймлайн, команда;
 - `sales` — вставленный текст квартального отчёта о продажах: ряды по месяцам,
   доли каналов, города, выводы и планы — вход, на котором в сентябре 2026
   колоды остались без диаграмм.
@@ -23,6 +25,12 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
+PITCH_BRIEF = (
+    "мы делаем сервис по созданию презентаций, пользователи 10к MAU, 2% конверсия "
+    "в платящих, средний чек 500 руб, целевая аудитория — студенты, школьники, "
+    "преподаватели"
+)
 
 BRIEF = (
     "Хотим показать руководителям подразделений новую функцию VK Teams — "
@@ -294,6 +302,11 @@ def build_all(directory: str | Path) -> dict[str, dict]:
     (directory / "sales_q3.txt").write_text(SALES, encoding="utf-8")
     # Контент датасета — платформа наблюдаемости — в нашей схеме
     # контент-пакета: берётся как есть, без разбора моделью.
+    # Реальный питч (Google Slides → PDF) с брифом в одну фразу — вход,
+    # на котором сайт в сентябре собрал половину слайдов из одних заголовков.
+    (directory / "fibonacci_ai.pdf").write_bytes(
+        (Path(__file__).parent / "fibonacci_pitch" / "fibonacci_ai.pdf").read_bytes()
+    )
     (directory / "observability.json").write_text(
         (Path(__file__).parent / "content_pack.json").read_text("utf-8"), encoding="utf-8"
     )
@@ -304,6 +317,7 @@ def build_all(directory: str | Path) -> dict[str, dict]:
         "json": {"text": "", "files": ["lotsman_export.json"], "purpose": "product"},
         "sales": {"text": "", "files": ["sales_q3.txt"], "purpose": "project"},
         "observability": {"text": "", "files": ["observability.json"], "purpose": "product"},
+        "pitch": {"text": PITCH_BRIEF, "files": ["fibonacci_ai.pdf"], "purpose": "product"},
     }
     (directory / "inputs.json").write_text(
         json.dumps(inputs, ensure_ascii=False, indent=2), encoding="utf-8"
