@@ -184,8 +184,7 @@ def _seats_all(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     for block in plan_slide.blocks:
         if not _block_lines(block):
             continue
@@ -223,8 +222,7 @@ def _seatings(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     result = []
     for block in plan_slide.blocks:
         if not _block_lines(block):
@@ -380,8 +378,7 @@ def _spare_cards(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     spare = 0
     for block in plan_slide.blocks:
         if not _block_lines(block):
@@ -419,8 +416,7 @@ def _unsuitable(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     filled: dict[str, set[str]] = {}
     cramped = []
     for block in plan_slide.blocks:
@@ -643,8 +639,7 @@ def _blocks_fit(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     for block in plan_slide.blocks:
         lines = _block_lines(block)
         if not lines:
@@ -3414,6 +3409,22 @@ def _subtitle_element(
     )
 
 
+def _header_taken(pattern: Pattern, plan_slide: SlidePlan) -> list[Box]:
+    """Что шапка слайда займёт до содержания: заголовок и подзаголовок.
+
+    Подбор мерил места содержания только за вычетом заголовка, а сборка
+    сначала сажает подзаголовок плана в его место. На `vk_tech` (run 33)
+    подзаголовок лежит на большой картинке донора: подбор видел её свободной
+    под график, сборка — занятой, и график сел в значок 0.15″ высотой 1 EMU.
+    """
+    title = _title_slot(pattern)
+    taken = [title.box] if title is not None else []
+    subtitle = _subtitle_slot(pattern)
+    if subtitle is not None and plan_slide.subtitle.strip():
+        taken.append(subtitle.box)
+    return taken
+
+
 def _subtitle_slot(container):
     for slot in getattr(container, "slots", []):
         if slot.role is SlotRole.SUBTITLE:
@@ -3539,8 +3550,16 @@ def _slides_for(
 
     parts = split_blocks(list(plan_slide.blocks))
     if len(parts) < 2:
-        # Делить нечего: блок один. Находка остаётся — это четвёртый шаг
-        # закона, и он честнее молчаливой обрезки.
+        # Делить нечего: блок один. Тесный график — в другую композицию: на
+        # `vk_education` (run 33) заголовок в четыре строки занял место фото
+        # донора, и единственный график слайда вышел высотой в 1 EMU.
+        if cramped:
+            return _roomier(
+                spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+                avoid, sections, slide, issues,
+            )
+        # Переполнение остаётся находкой — это четвёртый шаг закона, и он
+        # честнее молчаливой обрезки.
         return [slide], issues
 
     halves: list[SlideIR] = []

@@ -247,3 +247,39 @@ def test_cards_do_not_take_half_the_deck(photo_template, tmp_path, source, varia
         for element in slide.all_elements():
             if element.chart is not None:
                 assert element.box.h >= deck.slide_height_emu // 4, (slide.index, element.box)
+
+
+# ── 7. Живой прогон run 33: график высотой в 1 EMU ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("template", "source"),
+    (
+        (ROOT / "data" / "templates" / "vk_education.pptx", "observability_education"),
+        (VK_TECH, "sales_vk_tech_live"),
+    ),
+)
+def test_charts_never_collapse(tmp_path, template, source):
+    """График садится туда, где его видно, во всех трёх вариантах.
+
+    Run 33: на `vk_tech` airy подбор видел место под график свободным, а
+    сборка сначала сажала туда подзаголовок; на `vk_education` airy
+    заголовок в четыре строки занял место фото. Оба раза график выходил
+    высотой в 1 EMU, а слайд с одним блоком не уходил в другую композицию.
+    """
+    pack = ContentPack.model_validate(
+        json.loads((FIXTURES / source / "pack.json").read_text("utf-8"))
+    )
+    prepared = None
+    for variant in VARIANTS:
+        laid = lay_out_variant(
+            template, pack, load_config(CONFIG), RecordedClient(FIXTURES / source / "recorded"),
+            variant, tmp_path / variant, fix_mode="off", prepared=prepared,
+        )
+        prepared = laid.prepared
+        for slide in laid.deck.slides:
+            for element in slide.all_elements():
+                if element.chart is not None:
+                    assert element.box.h >= laid.deck.slide_height_emu // 4, (
+                        variant, slide.index, element.box,
+                    )
