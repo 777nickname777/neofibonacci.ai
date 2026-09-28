@@ -1,0 +1,21 @@
+{"brief":{"topic":"Итоги инициативы «Зелёный склад» за 3 квартала","purpose":"initiative","audience":"Руководство компании","goal":"Утвердить распространение инициативы на другие распределительные центры","language":"ru","extra_instructions":"","request":"","author":"","author_role":""},
+"documents":[
+{"id":"d1","name":"green_warehouse.pdf","kind":"pdf","char_count":882}
+],
+"facts":[
+{"id":"f1","text":"Цель инициативы — снизить потребление энергии и упаковки на РЦ в Подольске без роста себестоимости","source_doc_id":"d1","locator":"стр. 1","value":null,"unit":""},
+{"id":"f2","text":"Введены светодиодное освещение с датчиками движения","source_doc_id":"d1","locator":"стр. 1","value":null,"unit":""},
+{"id":"f3","text":"Внедрена рекуперация энергии на погрузчиках","source_doc_id":"d1","locator":"стр. 1","value":null,"unit":""},
+{"id":"f4","text":"Используется многоразовая тара для внутренних перемещений","source_doc_id":"d1","locator":"стр. 1","value":null,"unit":""},
+{"id":"f5","text":"Оптимизированы размеры коробок под заказ","source_doc_id":"d1","locator":"стр. 1","value":null,"unit":""},
+{"id":"f6","text":"За три квартала потребление энергии снизилось на 23 %","source_doc_id":"d1","locator":"стр. 1","value":23.0,"unit":"%"},
+{"id":"f7","text":"За три квартала расход упаковки снизился на 27 %","source_doc_id":"d1","locator":"стр. 1","value":27.0,"unit":"%"},
+{"id":"f8","text":"Стоимость обработки заказа снизилась на 2 рубля","source_doc_id":"d1","locator":"стр. 1","value":2.0,"unit":"руб"},
+{"id":"f9","text":"Предлагается распространить инициативу на РЦ в Казани и Екатеринбурге в следующем году","source_doc_id":"d1","locator":"стр. 1","value":null,"unit":""}
+],
+"series":[
+{"id":"s1","name":"Электроэнергия","unit":"МВт·ч","points":[{"label":"Q1","value":412.0},{"label":"Q2","value":365.0},{"label":"Q3","value":318.0}],"source_doc_id":"d1","locator":"стр. 1"},
+{"id":"s2","name":"Упаковка","unit":"тонн","points":[{"label":"Q1","value":96.0},{"label":"Q2","value":81.0},{"label":"Q3","value":70.0}],"source_doc_id":"d1","locator":"стр. 1"},
+{"id":"s3","name":"Стоимость обработки заказа","unit":"руб","points":[{"label":"Q1","value":54.0},{"label":"Q2","value":53.0},{"label":"Q3","value":52.0}],"source_doc_id":"d1","locator":"стр. 1"}
+],
+"quotes":[]}

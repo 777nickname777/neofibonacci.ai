@@ -1,0 +1,19 @@
+# Агент переписывания: текст слайда по находке, выбранной пользователем
+# («сократить», «разнести пункты»). Вызывается только при
+# run.rewrite_assisted: true.
+name: shorten_text
+version: "1"
+step: shorten_text
+description: >
+  Переписывает текст отмеченного слайда в бюджет длины шаблона, не меняя
+  чисел и смысла.
+endpoint: llm
+model: ${LLM_MODEL}
+prompt: rewrite_slide.v1
+params:
+  temperature: 0.2
+  max_tokens: 1000
+  enable_thinking: false
+limits:
+  timeout_seconds: 120
+  max_retries: 3

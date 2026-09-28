@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -41,6 +42,51 @@ class StepParams(BaseModel):
     # разброс времени ломает бюджет: планировщик на шести живых вызовах —
     # от 47.5 до 194.9 с при бюджете 300 на всю генерацию.
     hedge_after_seconds: float | None = Field(default=None, gt=0)
+    # Модель шага и его пределы — из агента (`agents/*.vN.yaml`). Не заданы —
+    # берутся у endpoint'а: `model`, `timeout_seconds`, `max_retries`.
+    model: str | None = None
+    timeout_seconds: int | None = Field(default=None, gt=0)
+    max_retries: int | None = Field(default=None, ge=0)
+
+
+class AgentLimits(BaseModel):
+    """Пределы одного обращения агента к модели."""
+
+    model_config = ConfigDict(extra="forbid")
+    timeout_seconds: int | None = Field(default=None, gt=0)
+    # Повторы после ответа, не прошедшего Pydantic-схему шага.
+    max_retries: int | None = Field(default=None, ge=0)
+    hedge_after_seconds: float | None = Field(default=None, gt=0)
+
+
+class Agent(BaseModel):
+    """Шаг пайплайна, обращающийся к модели, описанный одним файлом.
+
+    `agents/<имя>.vN.yaml`: модель, версия промпта, параметры запроса и
+    пределы. Версия агента и хэш его файла пишутся в манифест прогона —
+    так же, как версии промптов (A19).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    version: str
+    step: str
+    description: str = ""
+    endpoint: str = Field(pattern=r"^(llm|vlm)$")
+    model: str = ""
+    prompt: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    limits: AgentLimits = Field(default_factory=AgentLimits)
+    sha256: str = ""
+
+    def step_params(self) -> StepParams:
+        return StepParams(
+            **self.params,
+            model=self.model or None,
+            timeout_seconds=self.limits.timeout_seconds,
+            max_retries=self.limits.max_retries,
+            hedge_after_seconds=self.limits.hedge_after_seconds,
+        )
 
 
 class ModelConfig(BaseModel):
@@ -280,6 +326,13 @@ class Config(BaseModel):
     fonts: FontsConfig = Field(default_factory=FontsConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    agents: list[Agent] = Field(default_factory=list)
+
+    def agent(self, step: str) -> Agent:
+        for agent in self.agents:
+            if agent.step == step:
+                return agent
+        raise KeyError(f"агент шага {step!r} не задан")
 
     def variant(self, name: str) -> Variant:
         for v in self.variants:
@@ -333,4 +386,83 @@ def load_config(path: str | Path) -> Config:
         variants.append(_expand_env(_read_yaml(ref_path)))
     raw["variants"] = variants
 
-    return Config.model_validate(raw)
+    refs = raw.pop("agents", None)
+    agents = (
+        [_load_agent(_resolve(path, Path(ref))) for ref in refs]
+        if refs is not None
+        else _latest_agents()
+    )
+    steps = [agent.step for agent in agents]
+    if len(steps) != len(set(steps)):
+        raise ValueError(f"у шага несколько агентов: {sorted(steps)}")
+    for agent in agents:
+        endpoint = raw.setdefault(agent.endpoint, {}) or {}
+        raw[agent.endpoint] = endpoint
+        declared = endpoint.setdefault("steps", {}) or {}
+        endpoint["steps"] = declared
+        if agent.step in declared:
+            # Два источника параметров одного шага — и неясно, какой
+            # применился. Параметры шага живут только в агенте.
+            raise ValueError(
+                f"параметры шага {agent.step} заданы и в агенте {agent.name}.v{agent.version}, "
+                f"и в {path.name}: оставьте их только в агенте"
+            )
+        declared[agent.step] = agent.step_params().model_dump(exclude_none=True)
+    raw["agents"] = [agent.model_dump() for agent in agents]
+    config = Config.model_validate(raw)
+    _ACTIVE.clear()
+    _ACTIVE.update({agent.step: agent for agent in config.agents})
+    return config
+
+
+# Каталог агентов и промптов — рядом с пакетом, в корне репозитория.
+AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"
+PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+
+# Агенты последнего загруженного конфига: по ним слои выбирают версию
+# промпта (`agent_prompt`), не получая конфиг аргументом.
+_ACTIVE: dict[str, Agent] = {}
+
+
+def _resolve(config_path: Path, ref: Path) -> Path:
+    if ref.is_absolute():
+        return ref
+    for candidate in (config_path.parent / ref, config_path.parent.parent / ref, ref):
+        if candidate.exists():
+            return candidate
+    return ref
+
+
+def _load_agent(path: Path) -> Agent:
+    raw_bytes = path.read_bytes()
+    data = _expand_env(yaml.safe_load(raw_bytes.decode("utf-8")))
+    agent = Agent.model_validate({**data, "sha256": hashlib.sha256(raw_bytes).hexdigest()})
+    prompt = PROMPTS_DIR / f"{agent.prompt}.yaml"
+    if not prompt.exists():
+        raise ValueError(f"{path.name}: промпта {agent.prompt} нет в {PROMPTS_DIR}")
+    prompt_step = (yaml.safe_load(prompt.read_text("utf-8")) or {}).get("step")
+    if prompt_step != agent.step:
+        raise ValueError(
+            f"{path.name}: промпт {agent.prompt} написан для шага {prompt_step}, "
+            f"а агент — шаг {agent.step}"
+        )
+    return agent
+
+
+def _latest_agents() -> list[Agent]:
+    """Последняя версия каждого агента из `agents/` — если конфиг их не назвал."""
+    latest: dict[str, tuple[int, Path]] = {}
+    for path in AGENTS_DIR.glob("*.v*.yaml"):
+        name, _, version = path.stem.rpartition(".v")
+        if version.isdigit() and int(version) > latest.get(name, (0, path))[0]:
+            latest[name] = (int(version), path)
+    return [_load_agent(path) for _, path in sorted(latest.values())]
+
+
+def agent_prompt(step: str) -> str:
+    """Имя промпта шага («plan_deck.v6») — из агента этого шага."""
+    if not _ACTIVE:
+        _ACTIVE.update({agent.step: agent for agent in _latest_agents()})
+    if step not in _ACTIVE:
+        raise KeyError(f"агент шага {step!r} не задан в agents/")
+    return _ACTIVE[step].prompt

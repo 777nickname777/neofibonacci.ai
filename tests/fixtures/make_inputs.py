@@ -8,6 +8,8 @@
 - `docx` — длинный отчёт по проекту: разделы, списки, таблица, цитата;
 - `pdf` — квартальная справка по инициативе с таблицей, с текстовым слоем;
 - `json` — выгрузка продукта в чужой структуре: вложенные объекты, списки;
+- `observability` — контент датасета (платформа наблюдаемости) в нашей
+  схеме контент-пакета: разбор моделью не нужен;
 - `sales` — вставленный текст квартального отчёта о продажах: ряды по месяцам,
   доли каналов, города, выводы и планы — вход, на котором в сентябре 2026
   колоды остались без диаграмм.
@@ -290,12 +292,18 @@ def build_all(directory: str | Path) -> dict[str, dict]:
         json.dumps(FOREIGN_JSON, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     (directory / "sales_q3.txt").write_text(SALES, encoding="utf-8")
+    # Контент датасета — платформа наблюдаемости — в нашей схеме
+    # контент-пакета: берётся как есть, без разбора моделью.
+    (directory / "observability.json").write_text(
+        (Path(__file__).parent / "content_pack.json").read_text("utf-8"), encoding="utf-8"
+    )
     inputs = {
         "brief": {"text": BRIEF, "files": [], "purpose": "feature"},
         "docx": {"text": "", "files": ["crm_report.docx"], "purpose": "project"},
         "pdf": {"text": "", "files": ["green_warehouse.pdf"], "purpose": "initiative"},
         "json": {"text": "", "files": ["lotsman_export.json"], "purpose": "product"},
         "sales": {"text": "", "files": ["sales_q3.txt"], "purpose": "project"},
+        "observability": {"text": "", "files": ["observability.json"], "purpose": "product"},
     }
     (directory / "inputs.json").write_text(
         json.dumps(inputs, ensure_ascii=False, indent=2), encoding="utf-8"

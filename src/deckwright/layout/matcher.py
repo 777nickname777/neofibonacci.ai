@@ -184,13 +184,15 @@ def _seats_all(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     for block in plan_slide.blocks:
         if not _block_lines(block):
             continue
         role = strategy.role_for(block)
-        seats = _seat(pattern, block, role, free, taken)
+        seats = _seat(
+            pattern, block, role, free, taken,
+            reserve=_text_after(plan_slide.blocks, block, strategy),
+        )
         if seats is None:
             return False
         if _grid_seated(pattern, seats):
@@ -220,13 +222,15 @@ def _seatings(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     result = []
     for block in plan_slide.blocks:
         if not _block_lines(block):
             continue
-        seats = _seat(pattern, block, strategy.role_for(block), free, taken) or []
+        seats = _seat(
+            pattern, block, strategy.role_for(block), free, taken,
+            reserve=_text_after(plan_slide.blocks, block, strategy),
+        ) or []
         result.append((block, seats))
         taken.extend(slot.box for slot, _ in seats)
     return result
@@ -253,6 +257,94 @@ def _figure_unsplit(
         ):
             return True
     return False
+
+
+def _accent_for_data(pattern: Pattern, spec: TemplateSpec, has_series: bool) -> bool:
+    """График или таблица на акцентном фоне шаблона.
+
+    Фон, которым шаблон пишет меньшинство своих слайдов (тёмные обложки и
+    разделы светлого `vk_tech`), — акцент: обложка, раздел, заявление.
+    Данные читают на основном фоне. Мест под таблицу у `vk_tech` нет ни в
+    одной композиции, подбор шёл по разнообразию, и четвёртая таблица колоды
+    садилась на тёмную обложку раздела. Шаблон, где тёмных и светлых поровну
+    или все одного фона, акцента не имеет.
+    """
+    if not has_series:
+        return False
+    dark = sum(1 for other in spec.patterns if other.is_dark)
+    light = len(spec.patterns) - dark
+    return (pattern.is_dark and dark < light) or (not pattern.is_dark and light < dark)
+
+
+def _figure_small(
+    pattern: Pattern,
+    spec: TemplateSpec,
+    plan_slide: SlidePlan,
+    strategy: Strategy,
+    metrics: FontMetrics | None,
+    ladders: dict[SlotRole, list[float]] | None,
+) -> bool:
+    """Единственный показатель слайда пишется здесь мельче заголовка.
+
+    Слайд, где кроме заголовка только число, держится на этом числе. В
+    месте-строке под заголовком (`vk_tech`, 0.3″) «23 %» выходило кеглем 16
+    при заголовке 24 — одна мелкая цифра на пустом слайде. Крупное число —
+    не мельче типичного заголовка шаблона: так его набирают и сами доноры
+    показателей («42 минуты» — 48 pt при заголовке 20).
+    """
+    if metrics is None or not ladders:
+        return False
+    blocks = [block for block in plan_slide.blocks if _block_lines(block)]
+    if len(blocks) != 1 or blocks[0].kind is not BlockKind.KPI:
+        return False
+    title = role_typical(spec, SlotRole.TITLE)
+    for block, seats in _seatings(pattern, spec, plan_slide, strategy):
+        if not seats:
+            return True
+        seat, lines = seats[0]
+        fits, _ = _fit_block(
+            [(seat, seat.box, lines)], spec, strategy, metrics, ladders,
+            strategy.role_for(block),
+        )
+        return fits[0].size_pt < title
+    return False
+
+
+def _at_declared_size(
+    pattern: Pattern,
+    spec: TemplateSpec,
+    plan_slide: SlidePlan,
+    strategy: Strategy,
+    metrics: FontMetrics | None,
+    ladders: dict[SlotRole, list[float]] | None,
+) -> bool:
+    """Текст каждого блока влезает кеглем своего места, не уменьшаясь.
+
+    Место без объявленного кегля или мельче типичного тела шаблона (подпись
+    7 pt `vk_tech`) этой проверки не проходит: это мерка для мест, которые
+    шаблон сам набирает текстом.
+    """
+    if metrics is None or not ladders:
+        return False
+    body = role_typical(spec, SlotRole.BODY)
+    for block, seats in _seatings(pattern, spec, plan_slide, strategy):
+        if not seats or strategy.role_for(block) in _DATA_ROLES:
+            continue
+        fits, starts = _fit_block(
+            [(seat, seat.box, lines) for seat, lines in seats],
+            spec, strategy, metrics, ladders, strategy.role_for(block),
+        )
+        for (seat, _), fit, start in zip(seats, fits, starts, strict=True):
+            declared = seat.style.size_pt if seat.style is not None else 0.0
+            # Старт варианта — кегль места со сдвигом по шкале: плотный
+            # начинает на ступень мельче объявленного.
+            if declared < body * _DECLARED_BODY_SHARE or fit.size_pt < min(declared, start):
+                return False
+    return True
+
+
+# Место, набранное мельче этой доли типичного тела, — подпись, а не текст.
+_DECLARED_BODY_SHARE = 0.6
 
 
 def _share(inner: Box, outer: Box) -> float:
@@ -286,13 +378,15 @@ def _spare_cards(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     spare = 0
     for block in plan_slide.blocks:
         if not _block_lines(block):
             continue
-        seats = _seat(pattern, block, strategy.role_for(block), free, taken)
+        seats = _seat(
+            pattern, block, strategy.role_for(block), free, taken,
+            reserve=_text_after(plan_slide.blocks, block, strategy),
+        )
         if seats is None:
             continue
         # Повторитель, по которому разложен список, и его элементы донора.
@@ -322,14 +416,16 @@ def _unsuitable(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     filled: dict[str, set[str]] = {}
     cramped = []
     for block in plan_slide.blocks:
         if not _block_lines(block):
             continue
-        seats = _seat(pattern, block, strategy.role_for(block), free, taken)
+        seats = _seat(
+            pattern, block, strategy.role_for(block), free, taken,
+            reserve=_text_after(plan_slide.blocks, block, strategy),
+        )
         if seats is None:
             continue
         for slot, _ in seats:
@@ -429,10 +525,20 @@ def _without_photos(pattern: Pattern, spec: TemplateSpec) -> Pattern:
     grid = spec.grid
     left = grid.margin_left_emu if grid else spec.slide_width_emu // 20
     right = spec.slide_width_emu - (grid.margin_right_emu if grid else spec.slide_width_emu // 20)
+    # Рамки карточек повторителя. Карточки на место фото не растут, и
+    # место, стоящее с ними в одну колонку, — тоже: широкая карточка под
+    # двумя на шаблоне экзаменов растягивалась к левому полю, и её текст
+    # выходил за обводку, оставшуюся на месте.
+    frames = [frame for repeater in pattern.repeaters for frame in repeater.member_frames]
+    column = spec.slide_width_emu // 50
     grown = []
     for slot in pattern.slots:
         box = slot.box
-        if slot.role in _TEXT_GROWS_OVER_PHOTO:
+        in_column = any(
+            abs(frame.x - box.x) <= column or abs(frame.right - box.right) <= column
+            for frame in frames
+        )
+        if slot.role in _TEXT_GROWS_OVER_PHOTO and not in_column:
             for photo in side:
                 overlap = min(box.bottom, photo.bottom) - max(box.y, photo.y)
                 if overlap < box.h // 2:
@@ -533,14 +639,16 @@ def _blocks_fit(
     free = _fill_share(
         pattern, _usable_slots(pattern, spec.slide_width_emu, spec.slide_height_emu), strategy
     )
-    title = _title_slot(pattern)
-    taken = [title.box] if title is not None else []
+    taken = _header_taken(pattern, plan_slide)
     for block in plan_slide.blocks:
         lines = _block_lines(block)
         if not lines:
             continue
         role = strategy.role_for(block)
-        seats = _seat(pattern, block, role, free, taken)
+        seats = _seat(
+            pattern, block, role, free, taken,
+            reserve=_text_after(plan_slide.blocks, block, strategy),
+        )
         if seats is None:
             # Блок без места уходит в запасную полосу — это уже не
             # композиция шаблона, а вынужденная мера.
@@ -641,6 +749,15 @@ def pick_pattern(
     def suitable(candidates: list[Pattern]) -> list[Pattern]:
         return [pattern for pattern in candidates if not unsuitable(pattern)]
 
+    small: dict[str, bool] = {}
+
+    def figure_small(pattern: Pattern) -> bool:
+        if pattern.id not in small:
+            small[pattern.id] = _figure_small(
+                pattern, spec, plan_slide, strategy, metrics, ladders
+            )
+        return small[pattern.id]
+
     def best_of(candidates: list[Pattern], strict_ids: set[str] | None = None) -> Pattern:
         """Порядок решений: влезает текст → ещё не было в колоде → вариант.
 
@@ -676,6 +793,7 @@ def pick_pattern(
             # `vk_tech` три пункта ложились в пять пронумерованных карточек.
             return (
                 unsuitable(pattern),
+                _accent_for_data(pattern, spec, has_series),
                 # Фото донора — его тема, а не наша: студент за компьютером
                 # доезжал до колоды о продажах кофеен на семь слайдов из
                 # одиннадцати. Композиция без фото — раньше разнообразия; с
@@ -690,6 +808,7 @@ def pick_pattern(
                 # это важнее разнообразия: мелкое «42 минуты» в одном абзаце
                 # с подписью — не показатель.
                 _figure_unsplit(pattern, spec, plan_slide, strategy),
+                figure_small(pattern),
                 pattern.id in avoid,
                 # Сколько раз колода уже брала её — меньше лучше, а не только
                 # «брала или нет»: иначе при всех взятых выигрывала первая.
@@ -766,15 +885,35 @@ def pick_pattern(
                 # одна композиция с карточками, она брала восемь слайдов из
                 # четырнадцати. Третий раз подряд уступает той, что колода
                 # брала реже, если текст там читается тем же кеглем.
-                fresh = fitting(
-                    [
-                        pattern
-                        for pattern in suitable(pool)
-                        if repeats[pattern.id] < repeats[best.id]
-                        and not _photo_left_empty(pattern, spec, has_series)
-                    ],
-                    (tier,),
-                )
+                rarer = [
+                    pattern
+                    for pattern in suitable(pool)
+                    if repeats[pattern.id] < repeats[best.id]
+                    and not _photo_left_empty(pattern, spec, has_series)
+                    # Крупное число — не ценой разнообразия: третий слайд
+                    # с одним показателем берёт ту же композицию, а не
+                    # строку под заголовком.
+                    and (figure_small(best) or not figure_small(pattern))
+                ]
+                # Тем же кеглем — лучше; нет таких — та, где текст влезает
+                # хотя бы кеглем своего места. На синтетическом шаблоне с фото
+                # типичный кегль тела (24) взят из layout'ов мастера, а
+                # текстовые композиции набраны 16: по типичному проходили
+                # одни карточки, и они брали девять слайдов из четырнадцати.
+                fresh = fitting(rarer, (tier,)) or [
+                    pattern
+                    for pattern in fitting(rarer, (None,))
+                    if _at_declared_size(pattern, spec, plan_slide, strategy, metrics, ladders)
+                    # И не ценой списка в одной рамке, если у повторённой он
+                    # разложен по карточкам, — до четвёртого повтора: три
+                    # пункта шаблона экзаменов садились в одну рамку 11 pt
+                    # ради третьего слайда с карточками.
+                    and (
+                        not spread
+                        or repeats[best.id] > _MAX_REPEATS
+                        or _lists_spread(pattern, spec, plan_slide, strategy)
+                    )
+                ]
                 if fresh:
                     return best_of(fresh, strict_ids)
             return best
@@ -885,14 +1024,42 @@ def _fill_share(pattern: Pattern | None, slots: list, strategy: Strategy) -> lis
     подписи всех карточек стоят в порядке чтения раньше их текста.
     """
     fixed_ids = {slot.id for slot in pattern.slots} if pattern is not None else None
-    fixed = [slot for slot in slots if fixed_ids is None or slot.id in fixed_ids]
+    # Широкая карточка под рядом карточек — продолжение ряда (`_extra_cards`),
+    # и доля её не режет, как не режет карточки повторителя.
+    fixed = [
+        slot
+        for slot in slots
+        if (fixed_ids is None or slot.id in fixed_ids)
+        and not (pattern is not None and _continues_row(slot, pattern))
+    ]
     allowed = max(1, round(len(fixed) * strategy.slot_fill_target)) if fixed else 0
     kept = {id(slot) for slot in fixed[:allowed]}
     return [
         slot
         for slot in slots
-        if id(slot) in kept or (fixed_ids is not None and slot.id not in fixed_ids)
+        if id(slot) in kept
+        or (fixed_ids is not None and slot.id not in fixed_ids)
+        or (pattern is not None and _continues_row(slot, pattern))
     ]
+
+
+def _continues_row(slot, pattern: Pattern) -> bool:
+    """Текстовое место прямо под рядом карточек, в его границах и не уже карточки."""
+    if slot.role not in _CARD_TEXT_ROLES:
+        return False
+    for repeater in pattern.repeaters:
+        frames = repeater.member_frames
+        if len(frames) < 2:
+            continue
+        tolerance = min(frame.w for frame in frames) // 10
+        if (
+            slot.box.x >= min(frame.x for frame in frames) - tolerance
+            and slot.box.right <= max(frame.right for frame in frames) + tolerance
+            and slot.box.y >= max(frame.bottom for frame in frames) - tolerance
+            and slot.box.w >= min(frame.w for frame in frames)
+        ):
+            return True
+    return False
 
 
 def _title_slot(container):
@@ -995,7 +1162,12 @@ def _chunks(items: list[str], count: int) -> list[list[str]]:
 
 
 def _spread(
-    pattern: Pattern | None, block, wanted: SlotRole, free: list, taken: list[Box]
+    pattern: Pattern | None,
+    block,
+    wanted: SlotRole,
+    free: list,
+    taken: list[Box],
+    reserve: int = 0,
 ) -> list[tuple[object, list[str]]] | None:
     """Список, разложенный по элементам повторителя: пункт в карточку.
 
@@ -1031,6 +1203,7 @@ def _spread(
                 members.append(slot)
             if len(members) < 2:
                 continue
+            members += _extra_cards(repeater, item_slot, members, free, taken, block, reserve)
             covered = min(len(block.items), len(members))
             options.append(((covered, item_slot.box.area), repeater, members))
             break
@@ -1039,12 +1212,82 @@ def _spread(
     _, repeater, members = max(options, key=lambda option: option[0])
     count = min(len(block.items), len(members))
     prefix = f"{repeater.id}_"
-    free[:] = [slot for slot in free if not slot.id.startswith(prefix)]
+    chosen = {slot.id for slot in members[:count]}
+    free[:] = [
+        slot for slot in free if not slot.id.startswith(prefix) and slot.id not in chosen
+    ]
     return list(zip(members[:count], _chunks(list(block.items), count), strict=True))
 
 
+def _extra_cards(
+    repeater, item_slot, members: list, free: list, taken: list[Box], block, reserve: int
+) -> list:
+    """Места того же рода вслед за карточками, если пунктов больше карточек.
+
+    «Две карточки и широкая под ними» шаблона экзаменов: повторитель — две
+    одинаковые карточки, широкая — отдельное место той же роли. Три пункта
+    делились 2 + 1 по верхним карточкам, широкая оставалась под абзацем.
+    Места ниже или правее карточек, той же роли, не уже карточки и не меньше
+    половины её места под текст, продолжают ряд по порядку чтения; из
+    мест одной карточки берётся просторное.
+    """
+    prefix = f"{repeater.id}_"
+    # Места, нужные текстовым блокам слайда после списка, не берутся: иначе
+    # абзац под списком остаётся без места.
+    singles = [
+        slot
+        for slot in free
+        if not slot.id.startswith(prefix)
+        and slot.role in _CARD_TEXT_ROLES
+        and not any(_overlaps(slot.box, box) for box in taken)
+    ]
+    wanted = min(len(block.items) - len(members), len(singles) - reserve)
+    if wanted <= 0:
+        return []
+    first = members[0].box
+    extra = [
+        slot
+        for slot in free
+        if not slot.id.startswith(prefix)
+        and slot.role is item_slot.role
+        and slot.box.w >= first.w
+        and slot.box.area >= first.area // 2
+        and slot.box.y >= first.y
+        and not any(_overlaps(slot.box, box) for box in taken)
+        and not any(_overlaps(slot.box, member.box) for member in members)
+    ]
+    # Из мест одной карточки — одно, просторное, под текст, а не строка
+    # шапки: шапка и текст широкой карточки — одна колонка вплотную, и
+    # четыре пункта садились в неё двумя.
+    chosen: list = []
+    for slot in sorted(extra, key=lambda slot: -slot.box.area):
+        if len(chosen) == wanted:
+            break
+        if not any(
+            _stacked(slot.box, other.box) and _gap(slot.box, other.box) <= slot.box.h
+            for other in chosen
+        ):
+            chosen.append(slot)
+    return sorted(chosen, key=lambda slot: (slot.box.y, slot.box.x))
+
+
+def _text_after(blocks: list, block, strategy: Strategy) -> int:
+    """Сколько текстовых блоков слайда садятся после этого."""
+    index = next(i for i, other in enumerate(blocks) if other is block)
+    return sum(
+        1
+        for other in blocks[index + 1 :]
+        if _block_lines(other) and strategy.role_for(other) not in _DATA_ROLES
+    )
+
+
 def _seat(
-    pattern: Pattern | None, block, role: SlotRole, free: list, taken: list[Box]
+    pattern: Pattern | None,
+    block,
+    role: SlotRole,
+    free: list,
+    taken: list[Box],
+    reserve: int = 0,
 ) -> list[tuple[object, list[str]]] | None:
     """Места блока и строки для каждого; None — места не нашлось.
 
@@ -1057,7 +1300,7 @@ def _seat(
     сборке слайда: мерить одно, а собирать другое значит снова получить
     переполнение, которого подбор не предвидел.
     """
-    seats = _seat_raw(pattern, block, role, free, taken)
+    seats = _seat_raw(pattern, block, role, free, taken, reserve)
     if seats is None or pattern is None or not pattern.decor:
         return seats
     return [
@@ -1145,7 +1388,12 @@ def _grid_seated(pattern: Pattern | None, seats) -> bool:
 
 
 def _seat_raw(
-    pattern: Pattern | None, block, role: SlotRole, free: list, taken: list[Box]
+    pattern: Pattern | None,
+    block,
+    role: SlotRole,
+    free: list,
+    taken: list[Box],
+    reserve: int = 0,
 ) -> list[tuple[object, list[str]]] | None:
     grid = _grid_seats(pattern, block, free)
     if grid is not None:
@@ -1161,7 +1409,7 @@ def _seat_raw(
     if block.kind in _SPREAD_KINDS and len(block.items) > 1:
         for wanted in roles:
             pool = list(free)
-            spread = _spread(pattern, block, wanted, free, taken)
+            spread = _spread(pattern, block, wanted, free, taken, reserve)
             if spread:
                 return [
                     (_absorb(pattern, seat, pool, free, taken, block), lines)
@@ -1169,7 +1417,7 @@ def _seat_raw(
                 ]
     for wanted in roles:
         pool = list(free)
-        spread = _spread(pattern, block, wanted, free, taken)
+        spread = _spread(pattern, block, wanted, free, taken, reserve)
         if spread:
             return [
                 (_absorb(pattern, seat, pool, free, taken, block), lines)
@@ -1671,7 +1919,12 @@ def _content_area(spec: TemplateSpec, container) -> Box:
 
 
 def _free_band(
-    spec: TemplateSpec, container, index: int, bands: int, taken: list[Box]
+    spec: TemplateSpec,
+    container,
+    index: int,
+    bands: int,
+    taken: list[Box],
+    data: bool = False,
 ) -> Box:
     """Полоса свободной области для блока, которому не досталось слота.
 
@@ -1696,7 +1949,39 @@ def _free_band(
     top = min(max(area.y, floor), area.bottom - _MIN_BAND_SHARE_DIVISOR)
     remaining = max(_MIN_BAND_SHARE_DIVISOR, area.bottom - top)
     share = max(1, bands - index)
-    return Box(x=area.x, y=top, w=area.w, h=max(1, remaining // share))
+    band = Box(x=area.x, y=top, w=area.w, h=max(1, remaining // share))
+    if not data or _roomy_for_data(band, spec):
+        return band
+    side = _side_region(spec, container, area, taken)
+    return side if side is not None else band
+
+
+def _side_region(spec: TemplateSpec, container, area: Box, taken: list[Box]) -> Box | None:
+    """Место графика сбоку от текста, если под текстом его не осталось.
+
+    Полоса под всем занятым — на `vk_workspace` показатель сел в нижнее
+    место справа, и график получил под ним полосу в 0.15″, хотя слева от
+    показателя под заголовком пустовала половина слайда. Берётся область
+    под шапкой слева или справа от занятого содержанием, наибольшая из
+    тех, где график читается.
+    """
+    header = max((box.bottom for box in taken[:1]), default=area.y)
+    if isinstance(container, Pattern):
+        header = _header_bottom(container, header)
+    top = max(area.y, header) + spec.slide_height_emu // DATA_GAP_SHARE
+    content = [box for box in taken[1:] if box.bottom > top]
+    if not content or top >= area.bottom:
+        return None
+    gap = spec.slide_height_emu // DATA_GAP_SHARE
+    left = min(box.x for box in content) - gap
+    right = max(box.right for box in content) + gap
+    candidates = [
+        Box(x=x, y=top, w=w, h=area.bottom - top)
+        for x, w in ((area.x, left - area.x), (right, area.right - right))
+        if w > 0
+    ]
+    roomy = [box for box in candidates if _roomy_for_data(box, spec)]
+    return max(roomy, key=lambda box: box.area, default=None)
 
 
 def _data_element(
@@ -1787,7 +2072,12 @@ def _data_element(
             # Кегль — наибольший из шкалы, при котором таблица помещается в
             # отданное ей место: не мелкий текст в четверти слайда.
             size = _table_size(table, box, spec, body)
-            cell = cell.model_copy(update={"size_pt": size})
+            cell = cell.model_copy(
+                update={
+                    "size_pt": size,
+                    "color": _table_text(spec, background, is_dark, size) or cell.color,
+                }
+            )
             table = table.model_copy(update={"cell_style": cell})
             fill = brand[0]
             header = cell.model_copy(
@@ -1831,10 +2121,15 @@ def _table_size(table: TableContent, box: Box, spec: TemplateSpec, body: float) 
     Выше двух текстовых кеглей не растёт: таблица — не заголовок.
     """
     rows = len(table.rows) + 1
-    columns = max(1, len(table.header))
-    longest = max(
-        (len(cell) for row in [table.header, *table.rows] for cell in row), default=1
-    )
+    # Ширина — по самой длинной ячейке каждой колонки, а не самой длинной
+    # ячейке таблицы на все колонки: «Электроэнергия, МВт·ч» в первой колонке
+    # сводной таблицы `zelenie_investicii` мерило и три колонки чисел, и
+    # таблица выходила кеглем 12 в верхней трети слайда.
+    widths = [
+        max((len(row[column]) for row in [table.header, *table.rows] if column < len(row)),
+            default=1)
+        for column in range(max(1, len(table.header)))
+    ]
     ceiling = max(CHART_MIN_PT, body * TABLE_MAX_SCALE)
     steps = sorted(
         {step for step in scale_ladder(spec) if CHART_MIN_PT <= step <= ceiling}
@@ -1843,7 +2138,7 @@ def _table_size(table: TableContent, box: Box, spec: TemplateSpec, body: float) 
     )
     for step in steps:
         height = rows * step * TABLE_ROW_HEIGHT * EMU_PER_POINT
-        width = columns * (longest * CHAR_WIDTH + 2) * step * EMU_PER_POINT
+        width = sum(length * CHAR_WIDTH + 2 for length in widths) * step * EMU_PER_POINT
         if height <= box.h * 0.9 and width <= box.w:
             return step
     return steps[-1]
@@ -1867,6 +2162,26 @@ def _header_text(fill: Color, spec: TemplateSpec | None = None, size_pt: float =
     if _saturation(fill) >= 0.5 and white.contrast_ratio(fill) >= GRAPHIC_CONTRAST:
         return white
     return readable_text_color_on(fill)
+
+
+def _table_text(
+    spec: TemplateSpec, background: Color | None, is_dark: bool, size_pt: float
+) -> Color | None:
+    """Цвет текста ячеек — тот, которым пишет таблицы сам шаблон.
+
+    Ячейки брали цвет места, куда села таблица: на `vk_workspace` — голубой
+    подписи (70C3FF), хотя таблица шаблона пишет ячейки светло-серым
+    (E4E7EA). Берётся цвет таблиц шаблона, если он читается на этом фоне;
+    таблиц в шаблоне нет или цвет не читается — None, и остаётся цвет места.
+    """
+    judged = background or (Color(rgb="000000") if is_dark else Color(rgb="FFFFFF"))
+    needed = required_contrast(size_pt, False, MIN_CONTRAST)
+    for pattern in spec.patterns:
+        for slot in pattern.slots:
+            color = slot.style.color if slot.role is SlotRole.TABLE and slot.style else None
+            if color is not None and color.contrast_ratio(judged) >= needed:
+                return color
+    return None
 
 
 def _written_on(fill: Color, spec: TemplateSpec) -> list[Color]:
@@ -2130,10 +2445,11 @@ def _visible_palette(
 
 def _table_content(block, pack, style: TextStyle) -> TableContent | None:
     """Таблица блока: своя, если планировщик её составил, иначе из рядов."""
+    language = pack.brief.language if pack is not None else ""
     if block.table is not None and block.table.columns:
         return TableContent(
             header=list(block.table.columns),
-            rows=[list(row) for row in block.table.rows],
+            rows=_plain_numbers([list(row) for row in block.table.rows], language),
             header_style=style,
             cell_style=style,
         )
@@ -2152,7 +2468,7 @@ def _table_content(block, pack, style: TextStyle) -> TableContent | None:
             [
                 label,
                 *[
-                    f"{item.values[row]:g} {item.unit}".strip()
+                    f"{format_value(item.values[row], item.values, language)} {item.unit}".strip()
                     for item in chosen
                 ],
             ]
@@ -2161,6 +2477,30 @@ def _table_content(block, pack, style: TextStyle) -> TableContent | None:
         header_style=style,
         cell_style=style,
     )
+
+
+def _plain_numbers(rows: list[list[str]], language: str) -> list[list[str]]:
+    """Ячейки-числа таблицы плана — записью колоды, как числа графиков.
+
+    Модель пишет числа ячеек по-программистски: «412.0», «-2.0» в сводной
+    таблице `zelenie_investicii`. Ячейка, целиком состоящая из числа,
+    переписывается `format_value` по своей колонке: «412», «14,2»,
+    «41 380». Ячейки с единицей или знаком процента не трогаются.
+    """
+    def plain(cell: str) -> float | None:
+        try:
+            return float(cell.strip())
+        except ValueError:
+            return None
+
+    columns = max((len(row) for row in rows), default=0)
+    for column in range(columns):
+        values = [plain(row[column]) for row in rows if column < len(row)]
+        numbers = [value for value in values if value is not None]
+        for row in rows:
+            if column < len(row) and (value := plain(row[column])) is not None:
+                row[column] = format_value(value, numbers, language)
+    return rows
 
 
 def _block_lines(block) -> list[str]:
@@ -2438,7 +2778,12 @@ def build_slide_ir(
     homeless = 0
     bands = max(1, len(plan_slide.blocks))
     # Рамки, которые слайд уже занял. Заголовок занимает свою первым.
-    taken = [title_box] + [
+    # Заголовок занимает рамку, а переполненный — и строки ниже неё: на
+    # `vk_workspace` заголовок в четыре строки при рамке на две, а место
+    # показателя донора заходит в низ рамки на 7 % своей площади — в
+    # пределах допуска, — и «Итоговый результат пилота» ложился на заголовок.
+    title_taken = title_box.model_copy(update={"h": title_bottom - title_box.y})
+    taken = [title_taken] + [
         element.box for element in elements if element.role is SlotRole.SUBTITLE
     ]
 
@@ -2469,7 +2814,10 @@ def build_slide_ir(
         if not lines:
             continue
         role = strategy.role_for(block)
-        seats = _seat(pattern, block, role, free_slots, taken)
+        seats = _seat(
+            pattern, block, role, free_slots, taken,
+            reserve=_text_after([b for _, b in order], block, strategy),
+        )
         if _grid_seated(pattern, seats):
             # Таблица из прямоугольников — надписи по ячейкам, а не `a:tbl`.
             role = SlotRole.BODY
@@ -2489,7 +2837,9 @@ def build_slide_ir(
             seats, slot, box = [(None, lines)], None, multiples[block.id]
         elif slot is None:
             seats = [(None, lines)]
-            box = _free_band(spec, container, homeless, bands, taken)
+            box = _free_band(
+                spec, container, homeless, bands, taken, data=role in _DATA_ROLES
+            )
             homeless += 1
         else:
             box = slot.box
@@ -2534,7 +2884,7 @@ def build_slide_ir(
             for number, (seat, _) in enumerate(seats)
         ]
         color = colors[0]
-        others = [taken_box for taken_box in taken if taken_box is not title_box]
+        others = [taken_box for taken_box in taken if taken_box is not title_taken]
         taken.extend(seat_box for seat_box, _ in placed)
 
         # График и таблица занимают освободившееся место: место донора под
@@ -2550,6 +2900,13 @@ def build_slide_ir(
                 )
             elif box.y < top:
                 box = box.model_copy(update={"y": top, "h": max(1, box.bottom - top)})
+            if not _roomy_for_data(box, spec):
+                # Место донора под данными выше шапки (фото-баннер над
+                # заголовком): обрезанное по шапке, оно схлопывалось в
+                # график высотой в 1 EMU. Тогда — свободная полоса.
+                band = _free_band(spec, container, 0, 1, [title_taken, *others], data=True)
+                if _roomy_for_data(band, spec):
+                    box = band
 
         # Числовой ряд и таблица становятся нативными объектами, а не
         # пересказом строками: ТЗ засчитывает только `c:chart` и `a:tbl`, и
@@ -2726,7 +3083,8 @@ def build_deck_ir(
     sections = _sections(plan)
     for plan_slide in plan.slides:
         plan_slide = _mixed_units_as_table(
-            _tables_as_series(_heading_as_subtitle(spec, plan_slide), pack), pack
+            _tables_as_series(_heading_as_subtitle(spec, _figure_first(plan_slide)), pack),
+            pack,
         )
         avoid = {chosen[plan_slide.index] for chosen in others if plan_slide.index in chosen}
         built, found = _slides_for(
@@ -3051,11 +3409,52 @@ def _subtitle_element(
     )
 
 
+def _header_taken(pattern: Pattern, plan_slide: SlidePlan) -> list[Box]:
+    """Что шапка слайда займёт до содержания: заголовок и подзаголовок.
+
+    Подбор мерил места содержания только за вычетом заголовка, а сборка
+    сначала сажает подзаголовок плана в его место. На `vk_tech` (run 33)
+    подзаголовок лежит на большой картинке донора: подбор видел её свободной
+    под график, сборка — занятой, и график сел в значок 0.15″ высотой 1 EMU.
+    """
+    title = _title_slot(pattern)
+    taken = [title.box] if title is not None else []
+    subtitle = _subtitle_slot(pattern)
+    if subtitle is not None and plan_slide.subtitle.strip():
+        taken.append(subtitle.box)
+    return taken
+
+
 def _subtitle_slot(container):
     for slot in getattr(container, "slots", []):
         if slot.role is SlotRole.SUBTITLE:
             return slot
     return None
+
+
+def _figure_first(plan_slide: SlidePlan) -> SlidePlan:
+    """Показатель, где подпись стоит на месте числа, — число вперёд.
+
+    Число показателя — `heading`, подпись — `items`. Модель иногда меняет
+    их местами: «Итоговый результат пилота» числом и «9 минут» подписью, и
+    на `vk_workspace` крупным кеглем выходила подпись. Поле без единой
+    цифры числом не бывает: если в подписи цифры есть, а в числе нет, они
+    меняются местами.
+    """
+    def digits(text: str) -> bool:
+        return any(char.isdigit() for char in text)
+
+    blocks = [
+        block.model_copy(update={"heading": block.items[0], "items": [block.heading]})
+        if block.kind is BlockKind.KPI
+        and len(block.items) == 1
+        and block.heading.strip()
+        and not digits(block.heading)
+        and digits(block.items[0])
+        else block
+        for block in plan_slide.blocks
+    ]
+    return plan_slide.model_copy(update={"blocks": blocks})
 
 
 def _heading_as_subtitle(spec: TemplateSpec, plan_slide: SlidePlan) -> SlidePlan:
@@ -3151,8 +3550,16 @@ def _slides_for(
 
     parts = split_blocks(list(plan_slide.blocks))
     if len(parts) < 2:
-        # Делить нечего: блок один. Находка остаётся — это четвёртый шаг
-        # закона, и он честнее молчаливой обрезки.
+        # Делить нечего: блок один. Тесный график — в другую композицию: на
+        # `vk_education` (run 33) заголовок в четыре строки занял место фото
+        # донора, и единственный график слайда вышел высотой в 1 EMU.
+        if cramped:
+            return _roomier(
+                spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+                avoid, sections, slide, issues,
+            )
+        # Переполнение остаётся находкой — это четвёртый шаг закона, и он
+        # честнее молчаливой обрезки.
         return [slide], issues
 
     halves: list[SlideIR] = []

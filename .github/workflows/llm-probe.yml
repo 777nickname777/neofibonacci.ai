@@ -56,7 +56,7 @@ on:
         required: false
         default: "1"
       new_inputs:
-        description: "Четыре новых входа (бриф, docx, pdf, чужой JSON) на всех шаблонах: true — все, `вход:шаблон[,вход:шаблон…]` — выбранные пары (brief:vk_tech,docx:zelenie_investicii)"
+        description: "Входы (бриф, docx, pdf, чужой JSON, продажи, наблюдаемость) на всех шаблонах: true — все, `вход:шаблон[,вход:шаблон…]` — выбранные пары (brief:vk_tech,docx:zelenie_investicii)"
         required: false
         default: "false"
       audit_dpi:
@@ -90,11 +90,13 @@ jobs:
         run: |
           python - <<'PY'
           import os, pathlib, yaml
-          path = pathlib.Path("configs/config.yaml")
-          cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+          # Параметры шага живут в агенте (agents/plan_deck.vN.yaml).
+          path = sorted(pathlib.Path("agents").glob("plan_deck.v*.yaml"),
+                        key=lambda p: int(p.stem.rpartition(".v")[2]))[-1]
+          agent = yaml.safe_load(path.read_text(encoding="utf-8"))
           want = os.environ["ENABLE_THINKING"].strip().lower() == "true"
-          cfg["llm"]["steps"]["plan_deck"]["enable_thinking"] = want
-          path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+          agent["params"]["enable_thinking"] = want
+          path.write_text(yaml.safe_dump(agent, allow_unicode=True, sort_keys=False), encoding="utf-8")
           print("enable_thinking =", want)
           PY
         env:
@@ -256,7 +258,7 @@ jobs:
             exit 1
           fi
           python tests/fixtures/make_inputs.py probe-inputs
-          for INPUT in brief docx pdf json sales; do
+          for INPUT in brief docx pdf json sales observability; do
             for TEMPLATE in data/templates/vk_tech.pptx data/templates/vk_workspace.pptx \
                             data/templates/vk_education.pptx data/holdout/zelenie_investicii.pptx \
                             data/holdout/dorozhnaya_karta.pptx \

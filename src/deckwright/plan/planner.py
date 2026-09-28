@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from deckwright.config import agent_prompt
 from deckwright.llm.base import StructuredClient
 from deckwright.plan.budget import LengthBudget, compute_budget
 from deckwright.schemas import BlockKind, ContentPack, DeckPlan, PromptVersion, TemplateSpec
@@ -128,7 +129,7 @@ def build_plan(
     шаблона модель работает по одним порогам плотности из ТЗ — план тогда
     может не влезть, и разбираться с этим придётся фиттеру.
     """
-    prompt = load_prompt("plan_deck.v6", prompts_dir)
+    prompt = load_prompt(agent_prompt("plan_deck"), prompts_dir)
     budget = (
         compute_budget(
             spec, max_bullets, max_words_per_bullet, substitution_slack=substitution_slack
@@ -173,10 +174,10 @@ def _bounded(min_slides: int) -> type[DeckPlan]:
     Живой прогон `sales × vk_tech` (run 29): модель на просьбу «от 10 до 15»
     вернула обложку и повестку — два слайда, 168 токенов, — и колода вышла из
     двух слайдов. Такой ответ уходит на повтор, как любой невалидный. Порог —
-    половина нижней границы: план из восьми слайдов при «от 10» — выбор
-    модели, из двух — обрыв.
+    сама нижняя граница (A6: 10–15 слайдов): порог в половину её пропустил
+    план из пяти слайдов на `observability × vk_tech` (run 33).
     """
-    floor = max(3, min_slides // 2) if min_slides else 0
+    floor = min_slides or 0
     if not floor:
         return DeckPlan
 

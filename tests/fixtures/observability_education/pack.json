@@ -1,0 +1,13 @@
+{"brief":{"topic":"Платформа наблюдаемости для инженерных команд","purpose":"product","audience":"технические руководители","goal":"получить решение о пилоте","language":"ru","extra_instructions":"","request":"","author":"","author_role":""},
+"documents":[
+{"id":"d1","name":"product_brief.md","kind":"md","char_count":2400}
+],
+"facts":[
+{"id":"f1","text":"Среднее время обнаружения инцидента — 42 минуты","source_doc_id":"d1","locator":"раздел 2","value":42.0,"unit":"мин"},
+{"id":"f2","text":"Команды используют в среднем 4 разные системы мониторинга","source_doc_id":"d1","locator":"раздел 2","value":4.0,"unit":"систем"},
+{"id":"f3","text":"Пилот в двух командах сократил время обнаружения до 9 минут","source_doc_id":"d1","locator":"раздел 5","value":9.0,"unit":"мин"}
+],
+"series":[
+{"id":"ser_mttd","name":"Время обнаружения инцидента","unit":"мин","points":[{"label":"До пилота","value":42.0},{"label":"1-й месяц","value":21.0},{"label":"2-й месяц","value":9.0}],"source_doc_id":"d1","locator":"раздел 5","shape":null}
+],
+"quotes":[]}

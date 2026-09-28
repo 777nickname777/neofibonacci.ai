@@ -158,3 +158,49 @@ def test_unknown_config_key_is_a_loud_error():
 
     with pytest.raises(Exception, match="max_fix_iteraions"):
         Config.model_validate({"run": {"max_fix_iteraions": 3}})
+
+
+# ── Агенты: шаг с моделью — отдельный версионируемый файл ────────────────────
+
+
+def test_every_model_step_has_an_agent(cfg):
+    """Каждый шаг, на котором код зовёт модель, описан агентом `agents/*.vN.yaml`."""
+    from deckwright.llm.base import STEPS
+
+    assert {agent.step for agent in cfg.agents} == set(STEPS)
+    for agent in cfg.agents:
+        assert len(agent.sha256) == 64
+        endpoint = cfg.llm if agent.endpoint == "llm" else cfg.vlm
+        assert endpoint.step(agent.step) == agent.step_params()
+
+
+def test_prompt_version_comes_from_the_agent(cfg):
+    from deckwright.config import agent_prompt
+
+    for agent in cfg.agents:
+        assert agent_prompt(agent.step) == agent.prompt
+
+
+def test_step_params_live_only_in_the_agent(tmp_path):
+    """Параметры шага и в агенте, и в config.yaml — два источника: ошибка."""
+    import yaml
+
+    from deckwright.config import load_config
+
+    raw = yaml.safe_load(CONFIG.read_text("utf-8"))
+    raw["agents"] = [str(CONFIG.parents[1] / "agents" / "plan_deck.v1.yaml")]
+    raw["llm"]["steps"] = {"plan_deck": {"temperature": 0.9}}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), "utf-8")
+    with pytest.raises(ValueError, match="только в агенте"):
+        load_config(path)
+
+
+def test_agent_prompt_must_belong_to_its_step(tmp_path):
+    from deckwright.config import _load_agent
+
+    agent = tmp_path / "plan_deck.v9.yaml"
+    source = (CONFIG.parents[1] / "agents" / "plan_deck.v1.yaml").read_text("utf-8")
+    agent.write_text(source.replace("prompt: plan_deck.v6", "prompt: audit_deck.v1"), "utf-8")
+    with pytest.raises(ValueError, match="написан для шага audit_deck"):
+        _load_agent(agent)

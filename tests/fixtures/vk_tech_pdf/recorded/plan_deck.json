@@ -1,0 +1,366 @@
+{
+  "title": "Итоги «Зелёного склада» за 3 квартала",
+  "subtitle": "Снижение затрат и ресурсов без роста себестоимости",
+  "purpose": "initiative",
+  "language": "ru",
+  "slides": [
+    {
+      "index": 1,
+      "intent": "title",
+      "takeaway_title": "Итоги «Зелёного склада» за 3 квартала",
+      "subtitle": "Снижение затрат и ресурсов без роста себестоимости",
+      "blocks": [],
+      "speaker_notes": "",
+      "figures": []
+    },
+    {
+      "index": 2,
+      "intent": "agenda",
+      "takeaway_title": "Структура презентации",
+      "subtitle": "План доклада",
+      "blocks": [
+        {
+          "id": "b1",
+          "kind": "bullets",
+          "heading": "",
+          "items": [
+            "Цели и применённые меры",
+            "Динамика энергопотребления",
+            "Снижение расхода упаковки",
+            "Влияние на стоимость заказа",
+            "Итоговые показатели эффективности",
+            "План масштабирования"
+          ],
+          "series_ids": [],
+          "fact_ids": [],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": []
+    },
+    {
+      "index": 3,
+      "intent": "context",
+      "takeaway_title": "Цель: снижение ресурсов без роста цен",
+      "subtitle": "Задачи инициативы",
+      "blocks": [
+        {
+          "id": "b2",
+          "kind": "paragraph",
+          "heading": "",
+          "items": [],
+          "series_ids": [],
+          "fact_ids": [
+            "f1"
+          ],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": []
+    },
+    {
+      "index": 4,
+      "intent": "solution",
+      "takeaway_title": "Применены технологии рекуперации и LED",
+      "subtitle": "Ключевые меры",
+      "blocks": [
+        {
+          "id": "b3",
+          "kind": "bullets",
+          "heading": "",
+          "items": [
+            "Установка светодиодного освещения",
+            "Внедрение систем рекуперации энергии",
+            "Переход на многоразовую тару"
+          ],
+          "series_ids": [],
+          "fact_ids": [
+            "f2"
+          ],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": []
+    },
+    {
+      "index": 5,
+      "intent": "evidence",
+      "takeaway_title": "Энергопотребление снизилось с 412 до 318 МВт·ч",
+      "subtitle": "Динамика по кварталам",
+      "blocks": [
+        {
+          "id": "b4",
+          "kind": "series",
+          "heading": "",
+          "items": [],
+          "series_ids": [
+            "s1"
+          ],
+          "fact_ids": [],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": [
+        {
+          "text": "412",
+          "kind": "cited",
+          "fact_ids": [
+            "f3"
+          ],
+          "formula": ""
+        },
+        {
+          "text": "318",
+          "kind": "cited",
+          "fact_ids": [
+            "f5"
+          ],
+          "formula": ""
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "intent": "evidence",
+      "takeaway_title": "Расход упаковки упал с 96 до 70 тонн",
+      "subtitle": "Динамика по кварталам",
+      "blocks": [
+        {
+          "id": "b5",
+          "kind": "series",
+          "heading": "",
+          "items": [],
+          "series_ids": [
+            "s2"
+          ],
+          "fact_ids": [],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": [
+        {
+          "text": "96",
+          "kind": "cited",
+          "fact_ids": [
+            "f6"
+          ],
+          "formula": ""
+        },
+        {
+          "text": "70",
+          "kind": "cited",
+          "fact_ids": [
+            "f8"
+          ],
+          "formula": ""
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "intent": "evidence",
+      "takeaway_title": "Стоимость заказа снизилась с 54 до 52 руб",
+      "subtitle": "Динамика по кварталам",
+      "blocks": [
+        {
+          "id": "b6",
+          "kind": "series",
+          "heading": "",
+          "items": [],
+          "series_ids": [
+            "s3"
+          ],
+          "fact_ids": [],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": [
+        {
+          "text": "54",
+          "kind": "cited",
+          "fact_ids": [
+            "f9"
+          ],
+          "formula": ""
+        },
+        {
+          "text": "52",
+          "kind": "cited",
+          "fact_ids": [
+            "f11"
+          ],
+          "formula": ""
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "intent": "comparison",
+      "takeaway_title": "Энергия: снижение на 23 % за три квартала",
+      "subtitle": "Итоговый показатель",
+      "blocks": [
+        {
+          "id": "b7",
+          "kind": "kpi",
+          "heading": "",
+          "items": [
+            "23 %"
+          ],
+          "series_ids": [],
+          "fact_ids": [
+            "f12"
+          ],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": [
+        {
+          "text": "23",
+          "kind": "cited",
+          "fact_ids": [
+            "f12"
+          ],
+          "formula": ""
+        }
+      ]
+    },
+    {
+      "index": 9,
+      "intent": "comparison",
+      "takeaway_title": "Упаковка: снижение на 27 % за три квартала",
+      "subtitle": "Итоговый показатель",
+      "blocks": [
+        {
+          "id": "b8",
+          "kind": "kpi",
+          "heading": "",
+          "items": [
+            "27 %"
+          ],
+          "series_ids": [],
+          "fact_ids": [
+            "f13"
+          ],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": [
+        {
+          "text": "27",
+          "kind": "cited",
+          "fact_ids": [
+            "f13"
+          ],
+          "formula": ""
+        }
+      ]
+    },
+    {
+      "index": 10,
+      "intent": "comparison",
+      "takeaway_title": "Себестоимость заказа снизилась на 2 рубля",
+      "subtitle": "Итоговый показатель",
+      "blocks": [
+        {
+          "id": "b9",
+          "kind": "kpi",
+          "heading": "",
+          "items": [
+            "2 руб"
+          ],
+          "series_ids": [],
+          "fact_ids": [
+            "f14"
+          ],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": [
+        {
+          "text": "2",
+          "kind": "cited",
+          "fact_ids": [
+            "f14"
+          ],
+          "formula": ""
+        }
+      ]
+    },
+    {
+      "index": 11,
+      "intent": "roadmap",
+      "takeaway_title": "Масштабировать на Казань и Екатеринбург",
+      "subtitle": "Предложение по развитию",
+      "blocks": [
+        {
+          "id": "b10",
+          "kind": "bullets",
+          "heading": "",
+          "items": [
+            "Распространить инициативу на новые склады",
+            "Целевые локации: Казань и Екатеринбург"
+          ],
+          "series_ids": [],
+          "fact_ids": [
+            "f15"
+          ],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": []
+    },
+    {
+      "index": 12,
+      "intent": "ask",
+      "takeaway_title": "Утвердить план внедрения на новых складах",
+      "subtitle": "Решение руководства",
+      "blocks": [
+        {
+          "id": "b11",
+          "kind": "paragraph",
+          "heading": "",
+          "items": [],
+          "series_ids": [],
+          "fact_ids": [
+            "f15"
+          ],
+          "quote_id": null,
+          "image_prompt": "",
+          "table": null
+        }
+      ],
+      "speaker_notes": "",
+      "figures": []
+    }
+  ]
+}
