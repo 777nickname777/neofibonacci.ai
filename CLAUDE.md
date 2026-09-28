@@ -64,6 +64,13 @@ SlideIR+.pptx+.png ─►[5 audit]─► Issue[] ─► UI ─► выбранн
 же записью, что числа графиков. Записанные планы пробы 4×4 —
 `tests/fixtures/{vk_tech_pdf,zelenie_pdf}/`.
 
+Шаг с моделью — агент `agents/<имя>.vN.yaml` (модель, промпт, параметры,
+пределы); параметры шагов только там, `config.yaml` перечисляет агентов,
+версии и хэши агентов — в `RunManifest.agents`. Промпт шаг берёт из агента
+(`config.agent_prompt`). План короче `deck.min_slides` — невалидный ответ.
+Наборы для сдачи — `outputs/demo/{observability,sales}/`
+(`scripts/demo_set.py`: колоды по живому плану, время и находки из лога).
+
 Числа на графиках пишутся форматом по самим данным и с локалью языка колоды
 (`charts.number_format`: «41 380», «14,2», «1,2 млн») — ни `General`, ни `0`.
 Аудит по картинкам получает слайд при `audit.contextual_dpi` (96: при 72 и 60
@@ -111,6 +118,7 @@ SlideIR+.pptx+.png ─►[5 audit]─► Issue[] ─► UI ─► выбранн
 | журнал прогресса по фазам | `progress/handoff.md` |
 | листы до/после приёмки сентября, сравнение dpi | `outputs/review/sales-sept/` |
 | листы до/после шести дефектов вёрстки | `outputs/review/layout-defects/` |
+| наборы для сдачи: таблица, сводный лист, pptx/pdf/html | `outputs/demo/{observability,sales}/` |
 | пайплайн и границы слоёв | `docs/ARCHITECTURE.md` |
 | модели, лицензии, требования | `docs/MODELS.md` |
 | проверки аудита и покрытие | `docs/AUDIT.md` |
