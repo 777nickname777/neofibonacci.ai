@@ -246,3 +246,61 @@ def test_parallelism_is_never_zero(monkeypatch):
     pdf._limit_size = 0
     pdf.configure_parallelism(0)
     assert pdf._limit_size >= 1
+
+
+def test_deck_is_handed_over_before_the_audit(tmp_path, monkeypatch):
+    """Файлы варианта готовы до аудита — и интерфейс получает их сразу.
+
+    Бюджет считается «с загрузки до выгрузки презентации пользователю», а
+    аудит по картинкам занимает 80-111 с из 170-262 с прогона (замеры
+    run 28-31). Колода к началу аудита уже собрана, проверена на
+    целостность и выгружена: держать её до конца проверки значит отдавать
+    то же самое, но на полторы минуты позже.
+    """
+    import json
+
+    sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
+    from make_template import build_template
+
+    from deckwright.llm.fake import RecordedClient
+    from deckwright.pipeline import complete_variant, lay_out_variant
+    from deckwright.schemas import ContentPack
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = load_config(root / "configs" / "config.yaml")
+    pack = ContentPack.model_validate(
+        json.loads((root / "tests/fixtures/content_pack.json").read_text("utf-8"))
+    )
+    template = build_template(tmp_path / "t.pptx")
+
+    seen: list[dict] = []
+    stages: list[str] = []
+
+    def on_export(ready: dict) -> None:
+        # Проверяем не «позвали», а «в этот момент файл уже лежит на диске»:
+        # кнопка, ведущая в пустоту, хуже отсутствующей кнопки.
+        seen.append(
+            {
+                "pptx": ready["pptx"].is_file() and ready["pptx"].stat().st_size > 0,
+                "аудит уже был": "audit" in stages,
+            }
+        )
+
+    laid = lay_out_variant(
+        template,
+        pack,
+        cfg,
+        RecordedClient(root / "tests/fixtures/recorded"),
+        "balanced",
+        tmp_path / "out",
+        run_id="early",
+        on_stage=stages.append,
+        on_export=on_export,
+    )
+    result = complete_variant(laid)
+
+    assert seen, "интерфейс не узнал, что файлы готовы"
+    assert seen[0]["pptx"], "позвали раньше, чем файл дописан"
+    assert not seen[0]["аудит уже был"], "позвали после аудита — смысла нет"
+    assert "audit" in stages, "этап аудита так и не начался: проба ничего не проверяет"
+    assert result.report is not None, "аудит всё равно обязан пройти"

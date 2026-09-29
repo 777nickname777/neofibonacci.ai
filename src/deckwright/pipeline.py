@@ -173,6 +173,12 @@ class _RunContext:
     text_findings: list[Issue] | SharedAudit | None = None
     # Куда сообщать о начале этапа. Нужно интерфейсу: прогон идёт минуты.
     on_stage: Callable[[str], None] | None = None
+    # Куда сообщать, что файлы варианта готовы, — до аудита. Аудит по
+    # картинкам занимает 80-111 с из 170-262 с прогона (замеры run 28-31),
+    # а колода к его началу уже собрана, проверена на целостность и
+    # выгружена. Держать её до конца проверки значит отдавать пользователю
+    # то же самое, но на полторы минуты позже.
+    on_export: Callable[[dict[str, object]], None] | None = None
     # Реестр композиций вариантов из `PreparedPlan`: пересборка после правки
     # обязана избегать того же, что и первая сборка.
     layouts: dict[str, dict[int, str]] | None = None
@@ -437,6 +443,19 @@ def _build(
     if pdf_path is not None and len(pages) != len(deck.slides):
         manifest.warnings.append(
             f"страниц в PDF {len(pages)}, а слайдов в колоде {len(deck.slides)}"
+        )
+
+    # Файлы готовы: интерфейс может отдать их, не дожидаясь аудита.
+    if ctx.on_export is not None:
+        ctx.on_export(
+            {
+                "pptx": pptx_path,
+                "pdf": pdf_path,
+                "html": html_path,
+                "pages": list(pages),
+                "export_errors": dict(export_errors),
+                "slides": len(deck.slides),
+            }
         )
 
     with _timed(manifest, "audit", ctx.on_stage):
@@ -831,6 +850,7 @@ def lay_out_variant(
     prepared: PreparedPlan | None = None,
     text_findings: list[Issue] | SharedAudit | None = None,
     on_stage: Callable[[str], None] | None = None,
+    on_export: Callable[[dict[str, object]], None] | None = None,
 ) -> LaidOut:
     """Разбор шаблона, план и раскладка одного варианта.
 
@@ -986,6 +1006,7 @@ def lay_out_variant(
         vlm_client=vlm_client,
         text_findings=text_findings,
         on_stage=on_stage,
+        on_export=on_export,
         layouts=prepared.layouts,
     )
     return LaidOut(

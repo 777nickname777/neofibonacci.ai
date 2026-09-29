@@ -541,6 +541,40 @@ def _await_export(variant_state: runs.VariantState) -> None:
         st.rerun(scope="app")
 
 
+def _early_downloads(state: runs.RunState, variant_state: runs.VariantState) -> None:
+    """Готовые файлы варианта, пока идёт аудит.
+
+    Колода собрана, проверена на целостность и выгружена до того, как
+    начнётся проверка качества: аудит по картинкам — 80-111 с из 170-262 с
+    прогона (замеры run 28-31). Пользователю незачем ждать полторы минуты
+    ради файла, который уже лежит на диске; находки дописываются следом,
+    в ту же вкладку.
+    """
+    st.caption(
+        f"{variant_state.name}: колода готова, идёт проверка качества "
+        "— находки появятся здесь"
+    )
+    columns = st.columns(3)
+    for column, fmt in zip(columns, ("pptx", "pdf", "html"), strict=True):
+        path = variant_state.files.get(fmt)
+        if path is None:
+            column.button(
+                f".{fmt} недоступен",
+                disabled=True,
+                key=f"early-off-{state.run_id}-{variant_state.name}-{fmt}",
+            )
+            continue
+        column.download_button(
+            f"Скачать .{fmt}",
+            data=path.read_bytes(),
+            file_name=path.name,
+            key=f"early-dl-{state.run_id}-{variant_state.name}-{fmt}",
+        )
+    if variant_state.early_export_errors:
+        missing = ", ".join(sorted(variant_state.early_export_errors))
+        st.warning(f"Готово не всё: не получен {missing}.")
+
+
 def _variant_tab(state: runs.RunState, variant_state: runs.VariantState, client, cfg) -> None:
     result = variant_state.result
     if result is None:
@@ -555,6 +589,8 @@ def _variant_tab(state: runs.RunState, variant_state: runs.VariantState, client,
                     "Подробности: "
                     f"`{state.workspace.diag / (variant_state.name + '.error.txt')}`"
                 )
+        elif variant_state.files:
+            _early_downloads(state, variant_state)
         else:
             st.info(f"{variant_state.name}: {variant_state.stage}")
         return

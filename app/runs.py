@@ -59,6 +59,14 @@ class VariantState:
     stage: str = "ожидает"
     result: PipelineResult | None = None
     error: str | None = None
+    # Файлы варианта, готовые до аудита. Аудит по картинкам занимает
+    # 80-111 с из 170-262 с прогона, а колода к его началу уже собрана,
+    # проверена на целостность и выгружена: держать её до конца проверки
+    # значит отдавать то же самое, но на полторы минуты позже. Находки
+    # приходят следом и дописываются во вкладку.
+    files: dict[str, Path] = field(default_factory=dict)
+    early_export_errors: dict[str, str] = field(default_factory=dict)
+    early_slides: int = 0
     # Идёт ли прямо сейчас повторный экспорт (без перегенерации).
     exporting: bool = False
     # Ключи находок, отмеченных человеком. Живут здесь, а не в форме: форма
@@ -321,6 +329,20 @@ def start(
                 def on_stage(stage: str, target: VariantState = variant_state) -> None:
                     target.stage = stage
 
+                def on_export(
+                    ready: dict, target: VariantState = variant_state
+                ) -> None:
+                    """Файлы готовы — отдать их, не дожидаясь аудита."""
+                    target.files = {
+                        fmt: path
+                        for fmt in ("pptx", "pdf", "html")
+                        if isinstance(path := ready.get(fmt), Path)
+                        and path.is_file()
+                        and path.stat().st_size > 0
+                    }
+                    target.early_export_errors = dict(ready.get("export_errors") or {})
+                    target.early_slides = int(ready.get("slides") or 0)
+
                 laid = lay_out_variant(
                     template_path=template_path,
                     pack=pack,
@@ -334,6 +356,7 @@ def start(
                     prepared=prepared,
                     text_findings=shared_audit,
                     on_stage=on_stage,
+                    on_export=on_export,
                 )
                 prepared = laid.prepared
                 laid_out.append((variant_state, laid))
