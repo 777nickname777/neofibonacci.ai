@@ -47,6 +47,9 @@ class StepParams(BaseModel):
     model: str | None = None
     timeout_seconds: int | None = Field(default=None, gt=0)
     max_retries: int | None = Field(default=None, ge=0)
+    # Сколько всего секунд шаг вправе потратить на повторы невалидных
+    # ответов. Не задан — предела нет, и шаг может съесть бюджет колоды.
+    retry_budget_seconds: float | None = Field(default=None, gt=0)
 
 
 class AgentLimits(BaseModel):
@@ -57,6 +60,10 @@ class AgentLimits(BaseModel):
     # Повторы после ответа, не прошедшего Pydantic-схему шага.
     max_retries: int | None = Field(default=None, ge=0)
     hedge_after_seconds: float | None = Field(default=None, gt=0)
+    # Потолок суммарного времени повторов: дальше шаг сдаётся, не дожидаясь
+    # исчерпания попыток. Повторы стоят дорого — попытка равна таймауту, —
+    # и без потолка один неудачный шаг выносит весь бюджет колоды.
+    retry_budget_seconds: float | None = Field(default=None, gt=0)
 
 
 class Agent(BaseModel):
@@ -86,6 +93,7 @@ class Agent(BaseModel):
             timeout_seconds=self.limits.timeout_seconds,
             max_retries=self.limits.max_retries,
             hedge_after_seconds=self.limits.hedge_after_seconds,
+            retry_budget_seconds=self.limits.retry_budget_seconds,
         )
 
 

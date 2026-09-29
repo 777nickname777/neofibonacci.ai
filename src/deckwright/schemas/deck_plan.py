@@ -255,6 +255,32 @@ class DeckPlan(BaseModel):
     def slide_count(self) -> int:
         return len(self.slides)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _figures_belong_to_slides(cls, data):
+        """`figures` — поле слайда, а не колоды.
+
+        Живой прогон на выложенном сервисе: модель вернула план, добавив
+        сверху пустое `figures: []`. Схема запрещает лишние поля, ответ ушёл
+        на повтор — и так четыре раза по 120 с. Прогон упал, потратив весь
+        бюджет колоды на исправление пустого списка, который ничего не
+        значит: его и отбрасываем.
+
+        Непустой список — другое дело: это числа, потерявшие свой слайд, и
+        молча выбросить их нельзя. Ответ остаётся невалидным, но текст
+        ошибки теперь говорит, куда их класть, — его видит модель на
+        повторе, в отличие от «Extra inputs are not permitted».
+        """
+        if not isinstance(data, dict) or "figures" not in data:
+            return data
+        stray = data["figures"]
+        if isinstance(stray, list) and not stray:
+            return {key: value for key, value in data.items() if key != "figures"}
+        raise ValueError(
+            "поле figures принадлежит слайду, а не колоде: перенеси каждое "
+            "число в figures того слайда, на котором оно показано"
+        )
+
     @model_validator(mode="after")
     def _indices_are_contiguous(self) -> DeckPlan:
         expected = list(range(1, len(self.slides) + 1))

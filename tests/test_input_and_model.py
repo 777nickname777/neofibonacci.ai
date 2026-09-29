@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -283,3 +284,45 @@ def test_requested_slide_count_is_honoured(wanted, tmp_path):
     assert len(laid.deck.slides) == wanted, (
         f"просили {wanted}, вышло {len(laid.deck.slides)}"
     )
+
+
+def test_retries_stop_at_their_time_budget():
+    """Шаг не съедает бюджет колоды на повторах невалидного ответа.
+
+    Живой прогон на выложенном сервисе: модель раз за разом возвращала план
+    с лишним полем, и шаг молотил четыре попытки по 120 с — восемь минут
+    при бюджете колоды в пять. Хостинг снял прогон раньше, чем шаг сдался,
+    и в журнале осталась только смерть процесса. С потолком времени шаг
+    сдаётся сам и говорит, сколько потратил.
+    """
+    from pydantic import BaseModel
+
+    from deckwright.config import ModelConfig, StepParams
+    from deckwright.llm.base import StructuredError
+    from deckwright.llm.client import LiveClient
+
+    class Answer(BaseModel):
+        value: int
+
+    cfg = ModelConfig(
+        base_url="http://example.invalid/v1",
+        api_key="not-used",
+        model="stub",
+        max_retries=9,
+        # Шаг берётся настоящий: конфигурация не принимает выдуманных имён.
+        steps={"plan_deck": StepParams(max_retries=9, retry_budget_seconds=0.05)},
+    )
+    client = LiveClient(cfg)
+    asked = []
+
+    def answer(step, messages, estimated):
+        asked.append(step)
+        time.sleep(0.03)
+        return '{"нет_такого_поля": 1}'
+
+    client._ask_hedged = answer
+
+    with pytest.raises(StructuredError, match="предел времени повторов"):
+        client.complete(step="plan_deck", prompt="дай число", schema=Answer)
+
+    assert 1 < len(asked) < 10, f"повторы не оборвались по времени: {len(asked)}"

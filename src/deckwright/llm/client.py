@@ -348,7 +348,16 @@ class LiveClient:
         estimated = self._estimate(step, messages, images)
         last_error = ""
         attempts = self._attempts(step)
-        for _ in range(attempts):
+        # Повтор стоит столько же, сколько сам вызов, и при таймауте 120 с
+        # четыре попытки — это восемь минут при бюджете колоды в пять. На
+        # выложенном сервисе так и вышло: модель добавила в план пустое поле
+        # `figures`, схема его отвергла, и шаг молотил повторы, пока хостинг
+        # не снял прогон. Потолок времени повторов обрывает это раньше — с
+        # внятной ошибкой вместо убитого процесса.
+        budget = self._cfg.step(step).retry_budget_seconds
+        started = time.monotonic()
+        spent = 0.0
+        for number in range(attempts):
             raw = self._ask_hedged(step, messages, estimated)
             try:
                 return schema.model_validate_json(strip_wrapping(raw))
@@ -369,6 +378,14 @@ class LiveClient:
                         ),
                     },
                 ]
+                spent = time.monotonic() - started
+                if budget is not None and spent >= budget:
+                    raise StructuredError(
+                        f"шаг {step}: модель не отдала валидный {schema.__name__} "
+                        f"за {number + 1} попыток и {spent:.0f} с — это предел "
+                        f"времени повторов ({budget:.0f} с). Последние ошибки:\n"
+                        f"{last_error}"
+                    ) from exc
         raise StructuredError(
             f"шаг {step}: модель не отдала валидный {schema.__name__} "
             f"за {attempts} попыток. Последние ошибки:\n{last_error}"

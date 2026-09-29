@@ -315,3 +315,44 @@ def test_figure_without_kind_is_cited():
     assert derived.kind is FigureKind.DERIVED
     with pytest.raises(ValidationError, match="без формулы"):
         Figure.model_validate({"text": "в 3 раза", "kind": "derived", "fact_ids": ["f3"]})
+
+
+def test_stray_deck_level_figures_do_not_cost_a_retry():
+    """Пустое `figures` сверху — не повод переспрашивать модель.
+
+    Живой прогон на выложенном сервисе: план пришёл с `figures: []` на
+    уровне колоды, схема отвергла его как лишнее поле, и шаг ушёл на четыре
+    повтора по 120 с — прогон сняли по времени. Пустой список не несёт
+    ничего, и терять на нём бюджет незачем.
+    """
+    raw = {
+        "title": "Колода",
+        "purpose": "project",
+        "figures": [],
+        "slides": [
+            {"index": 1, "intent": "title", "takeaway_title": "Заголовок"},
+            {"index": 2, "intent": "closing", "takeaway_title": "Вывод"},
+        ],
+    }
+    plan = DeckPlan.model_validate(raw)
+
+    assert plan.slide_count == 2
+    assert not hasattr(plan, "figures"), "figures колоде не принадлежит"
+    assert plan.slides[0].figures == []
+
+
+def test_figures_with_numbers_at_deck_level_are_named_not_swallowed():
+    """Непустое `figures` сверху — числа без слайда: ответ невалиден.
+
+    Молча выбросить их нельзя: по ним аудит проверяет происхождение чисел.
+    Ошибка говорит, куда их класть, — её текст уходит модели на повтор, и
+    это лучше, чем «Extra inputs are not permitted».
+    """
+    raw = {
+        "title": "Колода",
+        "purpose": "project",
+        "figures": [{"text": "26", "fact_ids": ["f3"]}],
+        "slides": [{"index": 1, "intent": "title", "takeaway_title": "Заголовок"}],
+    }
+    with pytest.raises(ValidationError, match="принадлежит слайду"):
+        DeckPlan.model_validate(raw)
