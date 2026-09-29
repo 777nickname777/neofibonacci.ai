@@ -50,11 +50,13 @@ def add_table(
     for row_index, row in enumerate(content.rows, start=1):
         for column_index, value in enumerate(row):
             cell = table.cell(row_index, column_index)
+            # Строка с выводом выделяется начертанием, а не цветом: весь
+            # текст слайда кроме заголовка пишется одним цветом, и таблица
+            # не исключение. Цветом брать было заманчиво — но тогда на
+            # слайде оказывалось два цвета текста, и правило нарушала сама
+            # подсветка.
             key = row_index - 1 in content.highlight_rows
-            style = content.cell_style
-            if key and style is not None and content.accent is not None:
-                style = style.model_copy(update={"color": content.accent})
-            _write(cell, value, style, bold=key)
+            _write(cell, value, content.cell_style, bold=key)
             if background is not None:
                 # Тело таблицы живёт на фоне слайда, а не на белой подложке:
                 # иначе на тёмном шаблоне посреди колоды появляется белый

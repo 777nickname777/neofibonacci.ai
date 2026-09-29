@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from deckwright.audit.registry import check
+from deckwright.plan.figures import source_of as figure_source
 from deckwright.plan.figures import verify as verify_figure
 from deckwright.schemas import (
     DeckIR,
@@ -141,44 +142,6 @@ def title_only(deck: DeckIR, spec=None) -> list[Issue]:
 _HEADER_ROLES = frozenset(
     {SlotRole.TITLE, SlotRole.SUBTITLE, SlotRole.FOOTER, SlotRole.SLIDE_NUMBER}
 )
-
-
-def fill_ratio(
-    pptx_path: str | Path, deck: DeckIR, min_fill: float = MIN_FILL_RATIO
-) -> list[Issue]:
-    """Слишком пустой слайд: содержание где-то потерялось.
-
-    Считается по **собранному `.pptx`**, а не по `SlideIR`. После того как
-    композиция стала клонироваться с донора, представление вёрстки описывает
-    лишь малую часть слайда — карточки, картинки и декор живут в пакете. Счёт
-    по IR давал «пусто» на десяти слайдах из двенадцати, при том что слайды
-    заполнены. Мерить надо то, что видит человек.
-    """
-    from pptx import Presentation
-
-    area = deck.slide_width_emu * deck.slide_height_emu
-    if area <= 0:
-        return []
-
-    found: list[Issue] = []
-    presentation = Presentation(str(pptx_path))
-    for index, slide in enumerate(presentation.slides, start=1):
-        used = sum(
-            (shape.width or 0) * (shape.height or 0)
-            for shape in slide.shapes
-            if shape.left is not None
-        )
-        ratio = used / area
-        if ratio >= min_fill:
-            continue
-        found.append(
-            _issue(
-                "density.slide_too_empty",
-                index,
-                f"слайд заполнен на {100 * ratio:.0f}% при пороге {100 * min_fill:.0f}%",
-            )
-        )
-    return found
 
 
 def duplicate_slides(deck: DeckIR) -> list[Issue]:
@@ -351,14 +314,33 @@ def figures(plan: DeckPlan, pack) -> list[Issue]:
             problem = verify_figure(figure, pack)
             if problem is None:
                 continue
-            check_id = (
-                "content.derived_figure_wrong"
-                if figure.formula
-                else "content.figure_not_in_sources"
-            )
+            if figure.formula:
+                found.append(
+                    _issue(
+                        "content.derived_figure_wrong",
+                        slide.index,
+                        f"{figure.text!r}: {problem}",
+                    )
+                )
+                continue
+            # Число верное, а ссылка не та — это не выдумка, и звать её
+            # ошибкой нельзя: человек прочитает «число не из источников» и
+            # перестанет верить правильной колоде.
+            elsewhere = figure_source(figure, pack)
+            if elsewhere is not None:
+                found.append(
+                    _issue(
+                        "content.figure_cites_wrong_fact",
+                        slide.index,
+                        f"{figure.text!r}: число взято из входа — {elsewhere}, "
+                        f"а объявлено процитированным из "
+                        f"{', '.join(figure.fact_ids) or '—'}",
+                    )
+                )
+                continue
             found.append(
                 _issue(
-                    check_id,
+                    "content.figure_not_in_sources",
                     slide.index,
                     f"{figure.text!r}: {problem}",
                 )
@@ -506,7 +488,6 @@ def run(
     found.extend(figures(plan, pack))
     found.extend(undeclared_numbers(plan, pack))
     if pptx_path is not None:
-        found.extend(fill_ratio(pptx_path, deck, min_fill))
         found.extend(package(pptx_path))
         found.extend(donor_data(pptx_path, deck, spec))
         found.extend(donor_background(pptx_path, deck, spec))

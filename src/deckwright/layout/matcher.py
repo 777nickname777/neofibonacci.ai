@@ -20,12 +20,24 @@ from __future__ import annotations
 
 import colorsys
 from collections import Counter
+from contextvars import ContextVar
 
 from deckwright.layout.fitter import FitResult, fit_paragraphs, fit_size, split_blocks
-from deckwright.layout.strategy import Strategy, ladder_for_role, role_typical, scale_ladder
-from deckwright.layout.text_metrics import FontMetrics, metrics_for_spec
+from deckwright.layout.strategy import (
+    Strategy,
+    ladder_for_role,
+    ladder_for_slot,
+    readable_floor,
+    role_typical,
+    scale_ladder,
+)
+from deckwright.layout.text_metrics import FontMetrics, Fonts
+from deckwright.parse import surfaces, tokens
 from deckwright.plan.figures import parse_number
 from deckwright.schemas import (
+    INK_BLACK,
+    INK_WHITE,
+    READABLE_RATIO,
     Align,
     BlockKind,
     Box,
@@ -44,6 +56,7 @@ from deckwright.schemas import (
     Paragraph,
     Pattern,
     PatternClass,
+    Plate,
     ProposedFix,
     Provenance,
     SeriesShape,
@@ -59,10 +72,12 @@ from deckwright.schemas import (
     TextContent,
     TextStyle,
     VAlign,
-    readable_text_color,
+    best_ink,
+    hardest_ground,
+    ink_for,
+    readable_ink,
     required_contrast,
 )
-from deckwright.schemas.common import LARGE_TEXT_PT
 from deckwright.visuals.charts import format_value, series_from_pack, series_unit
 
 # Намерения, которым хватает одного заголовка.
@@ -124,12 +139,97 @@ def needed_profile(plan_slide: SlidePlan, strategy: Strategy) -> dict[SlotRole, 
     return profile
 
 
+def _title_area(pattern: Pattern | None, box: Box) -> Box:
+    """Рамка заголовка, обрезанная по украшениям макета.
+
+    Одно определение на выбор композиции и на размещение. Мерить по полной
+    рамке, а верстать в обрезанную — значит выбрать композицию, в которой
+    заголовок заведомо не помещается, и завести находку на пустом месте.
+
+    Рамка донора шире своего текста: на обложке `vk_education` короткое
+    название дизайнера оставалось слева, а наше длинное шло поверх фигур
+    справа, и слово «ускорение» читалось по белому и розовому.
+    """
+    if pattern is None or not pattern.layout_obstacles:
+        return box
+    return _clear_of_decor(box, pattern.layout_obstacles)
+
+
+# Основные гарнитуры разбираемого шаблона: ставятся на время сборки колоды,
+# как резолвер цвета в разборе. Пусто — ограничения нет (прямой вызов
+# `build_slide_ir` из тестов).
+_PRINCIPAL_FONTS: ContextVar[frozenset[str]] = ContextVar(
+    "principal_fonts", default=frozenset()
+)
+
+
+def _family_of(slot, fallback: str, allowed: frozenset[str] | None = None) -> str:
+    """Гарнитура места: объявленная шаблоном, иначе основная гарнитура колоды.
+
+    Сводить всё к `spec.fonts[0]` нельзя: шаблон намеренно набирает заголовки
+    одной гарнитурой, а текст другой, и различие это — часть его оформления,
+    а не расхождение, которое надо чинить.
+
+    `allowed` — основные гарнитуры шаблона. Редкая третья достаётся
+    служебным надписям: у `vk_education` это `Consolas` на одной фигуре из
+    восьмисот. Набирать ею нашу прозу незачем — и ТЗ требует не больше двух
+    гарнитур на колоду.
+    """
+    style = getattr(slot, "style", None) if slot is not None else None
+    family = getattr(style, "font_family", "") if style is not None else ""
+    known = _PRINCIPAL_FONTS.get() if allowed is None else allowed
+    if family and known and family not in known:
+        return fallback
+    return family or fallback
+
+
+def _bold_of(slot) -> bool:
+    style = getattr(slot, "style", None) if slot is not None else None
+    return bool(getattr(style, "bold", False)) if style is not None else False
+
+
+def _italic_of(slot) -> bool:
+    style = getattr(slot, "style", None) if slot is not None else None
+    return bool(getattr(style, "italic", False)) if style is not None else False
+
+
+def _free_boxes(slots, taken: list[Box]) -> list[Box]:
+    """Места композиции, которые ещё никем не заняты.
+
+    Нужно графику: вырастая, он обязан оставить место блокам, которые
+    встанут после него.
+    """
+    return [
+        slot.box
+        for slot in slots
+        if slot is not None
+        and not any(_overlaps(slot.box, box) for box in taken)
+    ]
+
+
+def _metrics_of(fonts, slot, bold: bool | None = None):
+    """Метрики того начертания, которым место шаблона и будет набрано.
+
+    `fonts` — резолвер `text_metrics.Fonts`; None означает, что шрифтов нет
+    вовсе и мерить нечем. Заголовку начертание задаёт вёрстка, остальным —
+    сам шаблон.
+    """
+    if fonts is None:
+        return None
+    # Вызывающий снаружи может передать и готовые метрики: так мерит
+    # предсказатель ёмкости, которому начертание места не важно.
+    if not hasattr(fonts, "for_slot"):
+        return fonts
+    return fonts.for_slot(slot, bold=bold)
+
+
 def _title_fits(
     pattern: Pattern,
     plan_slide: SlidePlan,
     strategy: Strategy,
     metrics: FontMetrics | None,
     ladder: list[float],
+    spec: TemplateSpec | None = None,
 ) -> bool:
     """Влезает ли заголовок слайда в заголовочную рамку этой композиции.
 
@@ -143,8 +243,13 @@ def _title_fits(
     if slot is None:
         return False
     declared = slot.style.size_pt if slot.style is not None else (ladder[-1] if ladder else 18.0)
+    if spec is not None:
+        ladder = ladder_for_slot(spec, SlotRole.TITLE, declared) or ladder
     start = strategy.start_size(ladder, declared)
-    return fit_size(plan_slide.takeaway_title, metrics, slot.box, ladder, start).fits
+    area = _title_area(pattern, slot.box)
+    return fit_size(
+        plan_slide.takeaway_title, _metrics_of(metrics, slot, bold=True), area, ladder, start
+    ).fits
 
 
 # Роли, для которых «влезает» мерится площадью, а не текстом, и какую долю
@@ -205,7 +310,10 @@ def _seats_all(
         for slot, lines in seats:
             ladder = (ladders or {}).get(slot.role) or []
             if metrics is not None and ladder and role not in _DATA_ROLES:
-                smallest = fit_paragraphs(lines, metrics, slot.box, ladder, min(ladder))
+                smallest = fit_paragraphs(
+                    lines, _metrics_of(metrics, slot), slot.box, ladder, min(ladder),
+                    indent_emu=spec.bullet_indent_emu,
+                )
                 if not smallest.capacity_lines:
                     return False
             taken.append(slot.box)
@@ -731,7 +839,7 @@ def pick_pattern(
         titled = [
             pattern
             for pattern in candidates
-            if _title_fits(pattern, plan_slide, strategy, metrics, title_ladder)
+            if _title_fits(pattern, plan_slide, strategy, metrics, title_ladder, spec)
         ]
         for strict in tiers:
             found = [
@@ -780,7 +888,7 @@ def pick_pattern(
         roomy = fitting(candidates) or [
             pattern
             for pattern in candidates
-            if _title_fits(pattern, plan_slide, strategy, metrics, title_ladder)
+            if _title_fits(pattern, plan_slide, strategy, metrics, title_ladder, spec)
         ] or candidates
         order = {cls: rank for rank, cls in enumerate(strategy.pattern_preference)}
 
@@ -948,7 +1056,7 @@ def pick_pattern(
     titled = [
         pattern
         for pattern in seated
-        if _title_fits(pattern, plan_slide, strategy, metrics, title_ladder)
+        if _title_fits(pattern, plan_slide, strategy, metrics, title_ladder, spec)
     ]
     if titled or seated:
         return best_of(titled or seated)
@@ -1520,6 +1628,56 @@ _DECOR_EDGE_SHARE = 0.2
 _DECOR_GAP = 182_880  # 0.2″
 
 
+def _outside_protected(box: Box, zones: list[Box]) -> Box:
+    """Та же рамка, отодвинутая от защищённых зон.
+
+    Место донора само заходит на нижнюю полосу с логотипами: у закрывающего
+    слайда `ЛЦТ2026` подпись стоит на ней пятой частью высоты. Собственный
+    текст шаблона это его дело, а наш текст туда класть нельзя — рамка
+    урезается до наибольшей свободной части. Урезается **до** подбора
+    кегля: иначе обещанная высота разойдётся с нарисованной.
+
+    Не осталось ничего — рамка возвращается как была: молча обрезать
+    содержание хуже, чем честно завести находку о переполнении.
+    """
+    crossing = []
+    for zone in zones:
+        cross = box.intersection(zone)
+        if cross is None:
+            continue
+        # Рамка целиком внутри зоны — это не вторжение, а замысел: текст
+        # стоит в карточке, которую макет рисует как оформление. На шаблоне
+        # экзаменов так устроены все три карточки, и запрет отправлял три
+        # пункта в одну. Вторжение — это пересечение краем.
+        if cross.area >= 0.9 * box.area:
+            continue
+        crossing.append(zone)
+    if not crossing:
+        return box
+    parts = surfaces.free_regions(box, crossing, minimum=1)
+    if not parts:
+        return box
+    return max(parts, key=lambda part: part.area)
+
+
+def _clear_of_boxes(box: Box, reserved: list[Box], spec: TemplateSpec) -> Box:
+    """Та же рамка без кусков, отданных чужим местам.
+
+    Если после вычитания читаемого места не остаётся, рамка возвращается как
+    была: решать «данные сюда не помещаются» — дело подбора композиции и
+    аудита, а не молчаливой обрезки до полоски.
+    """
+    crossing = [other for other in reserved if _overlaps(box, other)]
+    if not crossing:
+        return box
+    parts = [
+        part
+        for part in surfaces.free_regions(box, crossing)
+        if _roomy_for_data(part, spec)
+    ]
+    return max(parts, key=lambda part: part.area) if parts else box
+
+
 def _clear_of_decor(box: Box, decor: list[Box]) -> Box:
     """Место текста без графики донора: кончается там, где она начинается.
 
@@ -1816,8 +1974,12 @@ def _fit_block(
             else _undeclared(spec, group_role, ladder)
         )
         start = strategy.start_size(ladder, declared)
+        # Метрики — того начертания, которым это место и будет набрано:
+        # места одной роли пишутся одинаково, значит и мерятся одинаково.
         found = _fit_seats(
-            [(seats[n][1], seats[n][2]) for n in numbers], metrics, ladder, start
+            [(seats[n][1], seats[n][2]) for n in numbers],
+            _metrics_of(metrics, slot), ladder, start,
+            indent_emu=spec.bullet_indent_emu,
         )
         for n, fit in zip(numbers, found, strict=True):
             fits[n] = fit
@@ -1830,13 +1992,20 @@ def _fit_seats(
     metrics: FontMetrics,
     ladder: list[float],
     start: float,
+    indent_emu: int = 0,
 ) -> list[FitResult]:
     """Один кегль на все места блока: карточки одного ряда пишутся одинаково."""
-    first = [fit_paragraphs(lines, metrics, box, ladder, start) for box, lines in seats]
+    first = [
+        fit_paragraphs(lines, metrics, box, ladder, start, indent_emu=indent_emu)
+        for box, lines in seats
+    ]
     common = min(fit.size_pt for fit in first)
     if all(fit.size_pt == common for fit in first):
         return first
-    return [fit_paragraphs(lines, metrics, box, ladder, common) for box, lines in seats]
+    return [
+        fit_paragraphs(lines, metrics, box, ladder, common, indent_emu=indent_emu)
+        for box, lines in seats
+    ]
 
 
 # ── Цвет и свободная область ─────────────────────────────────────────────────
@@ -1861,6 +2030,199 @@ def _under(slot, background: Color | None) -> Color | None:
     return background
 
 
+# Доля рамки, начиная с которой заливка донора считается фоном её текста.
+GROUND_SHARE = tokens.GROUND_SHARE
+# Какую часть рамки должна занять заливка, нарисованная поверх её фона,
+# чтобы считаться фоном текста. Меньше — это декор, пересёкший рамку углом:
+# чёрная полоса под таблицей `vk_education` занимала пятую часть её рамки, и
+# по ней таблице выбирался белый цвет — на белом слайде.
+_OVER_SHARE = 0.3
+# Накрывает рамку целиком — с точностью до скруглений и отступов.
+_COVERS = 0.9
+# Какую часть рамки не жалко потерять ради однородного фона под текстом.
+_SETTLE_KEEP = 0.45
+# Какая часть должна совпасть у клетки фона-картинки и рамки, чтобы клетка
+# считалась фоном её текста, а не соседней, задетой краем. Доля берётся от
+# меньшей из двух площадей: под широким блоком клетка мельче рамки, под
+# строкой в треть дюйма — наоборот.
+_CELL_SHARE = 0.25
+
+
+def grounds_of(box: Box, container, slot, background: Color | None, is_dark: bool):
+    """Все фоны, видимые под этой рамкой, — по геометрии слайда-донора.
+
+    Единственное место, где решается, на чём лежит текст. Спрашивать об
+    этом слот нельзя: у блока слота может не быть совсем (свободная полоса,
+    элемент повторителя, подпись под числом), и тогда цвет выбирался по
+    фону слайда. Так и вышло на `vk_workspace`: подпись показателя лежала
+    на голубой градиентной карточке, а белый цвет ей выбрали по чёрному
+    фону слайда — 2.8:1 в отрисованном PDF.
+
+    Возвращается список: у градиента опорных цветов несколько, а рамка,
+    задевшая шапку карточки, лежит сразу на двух фонах. Список пустой не
+    бывает — в крайнем случае это фон слайда или яркость шаблона.
+    """
+    found = _donor_grounds(box, container)
+    if not found:
+        card = getattr(slot, "backdrop", None) if slot is not None else None
+        found = [card] if card is not None else ([background] if background else [])
+    if not found:
+        return [BLACK if is_dark else WHITE]
+    unique = {}
+    for color in found:
+        unique.setdefault(color.rgb, color)
+    return list(unique.values())
+
+
+def _grounds_seen(box: Box, container):
+    """Что видно под рамкой: (пол, нарисованное поверх пола).
+
+    Пол — верхняя из заливок, накрывающих рамку целиком: карточка, панель.
+    Её нет — полом служит фон слайда, в том числе фон-картинка, снятая
+    клетками при разборе. Поверх пола остаются только те заливки, что
+    нарисованы позже него и задевают рамку частью: шапка карточки, плашка
+    заголовка, полоса. Порядок отрисовки здесь и решает: карточка поверх
+    фона-картинки эту картинку закрывает, и цвет текста решает карточка.
+    """
+    cells, covering, partial = [], [], []
+    for ground in getattr(container, "grounds", None) or []:
+        inside = ground.box.intersection(box)
+        if inside is None:
+            continue
+        if ground.z < 0:
+            # Фон-картинка разобрана клетками, и клетка мельче рамки: мерить
+            # её долей от рамки значит не увидеть фон под крупным блоком
+            # вовсе. Считается доля самой клетки, попавшая под рамку.
+            if inside.area >= _CELL_SHARE * min(ground.box.area, box.area):
+                cells.append(ground)
+            continue
+        if inside.area >= _COVERS * box.area:
+            covering.append(ground)
+        elif inside.area >= _OVER_SHARE * box.area:
+            partial.append(ground)
+    floor = max(covering, key=lambda ground: ground.z) if covering else None
+    floor_z = floor.z if floor is not None else -1
+    under = (
+        list(floor.colors)
+        if floor is not None
+        else [color for ground in cells for color in ground.colors]
+    )
+    over = [ground for ground in partial if ground.z > floor_z]
+    return under, over
+
+
+def _donor_grounds(box: Box, container) -> list[Color]:
+    """Все заливки донора, которые видно под рамкой."""
+    under, over = _grounds_seen(box, container)
+    return under + [color for ground in over for color in ground.colors]
+
+
+def _backdrop_of(box: Box, container, slot) -> Color | None:
+    """Подложка элемента для аудита: самая тяжёлая из заливок под его рамкой.
+
+    `None` — значит подложки нет и текст лежит на фоне слайда; так это поле
+    и читает аудит.
+    """
+    return hardest_ground(_donor_grounds(box, container)) or _under(slot, None)
+
+
+def _settled(box: Box, container, protected: list[Box] = ()) -> tuple[Box, object]:
+    """Рамка, под которой один фон, и подложка, если её надо растянуть.
+
+    Рамка, лежащая сразу на двух фонах, нечитаема любым цветом: карточка
+    `vk_workspace` — чёрная с голубой градиентной шапкой, и место донора
+    начинается внутри шапки; плашка ЛЦТ2026 — розовая под началом
+    заголовка, а сам заголовок вдвое длиннее её. Цветом это не решается,
+    только геометрией, и решений ровно два:
+
+    - отступить, если после отступа остаётся вся ширина места: текст уходит
+      под шапку карточки, оформление остаётся на месте;
+    - растянуть саму подложку донора под текст, если отступать значит
+      потерять ширину: розовая плашка становится длиннее, текст остаётся
+      там, куда его поставил шаблон.
+
+    Не выходит ни то ни другое — рамка не трогается: конфликт называет
+    находка, а не молчаливая обрезка.
+    """
+    under, over = _grounds_seen(box, container)
+    if not over or readable_ink(under + [c for g in over for c in g.colors]) is not None:
+        return box, None
+    crossing = [ground.box for ground in over]
+    parts = [
+        # Порог ширины у `free_regions` здесь не нужен: рамка заголовка
+        # бывает в треть дюйма высотой, и полудюймовый минимум отбрасывал
+        # единственный годный кусок. Достаточно того, что от места
+        # остаётся заметная доля.
+        part
+        for part in surfaces.free_regions(box, crossing, minimum=1)
+        if part.area >= box.area * _SETTLE_KEEP
+        and readable_ink(_donor_grounds(part, container)) is not None
+    ]
+    # Отступ по вертикали: ширина места цела, текст просто начинается ниже.
+    whole_width = [part for part in parts if part.w >= box.w * _KEEP_WIDTH]
+    if whole_width:
+        return max(whole_width, key=lambda part: part.area), None
+    grown = _grown_plate(box, over, protected, container)
+    if grown is not None:
+        return box, grown
+    return box, None
+
+
+# Насколько ширина рамки должна уцелеть, чтобы отступ считался переносом, а
+# не потерей места: иначе заголовок уезжает в колонку в треть слайда.
+_KEEP_WIDTH = 0.95
+
+
+def _grown_plate(box: Box, over, protected: list[Box], container):
+    """Подложка донора, растянутая под текст, — или `None`, если так нельзя.
+
+    Растёт только одна плашка и только под саму рамку: с отступами, какие
+    у донора были с её стороны. Вырасти на защищённую зону — логотип,
+    колонтитул — ей нельзя, там она закрыла бы оформление шаблона.
+    """
+    if len(over) != 1:
+        return None
+    plate = over[0]
+    if len(plate.colors) != 1 or readable_ink(plate.colors) is None:
+        return None
+    pad_x = max(0, box.x - plate.box.x)
+    pad_y = max(0, box.y - plate.box.y)
+    x = min(plate.box.x, box.x - pad_x)
+    y = min(plate.box.y, box.y - pad_y)
+    right = max(plate.box.right, box.right + pad_x)
+    bottom = max(plate.box.bottom, box.bottom + pad_y)
+    target = Box(x=x, y=y, w=right - x, h=bottom - y)
+    if any(_overlaps(target, zone) for zone in protected):
+        return None
+    return Plate(donor=plate.box, box=target, color=plate.colors[0])
+
+
+def ink_over(grounds: list[Color]) -> Color:
+    """Цвет текста для рамки, под которой эти фоны.
+
+    Читаемый на всех — им и пишем. Если такого нет (рамка лежит и на
+    светлом, и на тёмном), берём тот, у кого худший из этих фонов лучше:
+    остальное решает место, а не цвет, и конфликт называется находкой.
+    """
+    return readable_ink(grounds) or best_ink(grounds) or BLACK
+
+
+def ground_under(slot, background: Color | None, is_dark: bool) -> Color:
+    """Что на самом деле лежит под текстом этого места.
+
+    Порядок ровно такой: собственная подложка места (карточка, плашка), фон
+    слайда, и только если ни того ни другого не известно — судим по яркости
+    шаблона. Цвет фона слайда не равен фону блока: текст на белой карточке
+    посреди тёмного слайда читается по карточке.
+    """
+    card = getattr(slot, "backdrop", None) if slot is not None else None
+    if card is not None:
+        return card
+    if background is not None:
+        return background
+    return BLACK if is_dark else WHITE
+
+
 def _text_color(
     container,
     role: SlotRole,
@@ -1870,86 +2232,344 @@ def _text_color(
     slot=None,
     size_pt: float = 0.0,
     bold: bool = False,
+    box: Box | None = None,
 ) -> Color:
-    """Цвет текста для роли — взятый из самого шаблона и проверенный на фоне.
+    """Цвет текста: чёрный или белый — по фактическому фону под ним.
 
-    Порядок предпочтений: цвет, которым шаблон пишет в этом самом месте
-    (`slot`); затем — текст этой роли в композиции; затем цвет любого её
-    текстового слота; и только если шаблон не сказал ничего — выбор по
-    яркости фона.
+    Прежде цвет брался из шаблона и лишь проверялся контрастом. Требование
+    к результату строже: тёмный фон — белый текст, светлый — чёрный, и не
+    ниже 4.5:1 на всём, включая заголовки. Фирменный цвет текста этому
+    правилу уступает; цвета логотипов, заливок и рядов данных не трогаются.
 
-    Так правильнее, чем всегда считать по фону: шаблон уже решил, каким
-    цветом здесь писать, и его решение учитывает градиенты, фоновые картинки
-    и декор, о которых мы не знаем ничего.
+    Решение принимается по относительной яркости sRGB с линеаризацией
+    каналов, а не по названию цвета, среднему RGB или порогу на глаз.
 
-    Но взятый цвет обязан пройти проверку контрастом — порогом для этого
-    кегля: крупному тексту WCAG требует 3:1, основному 4.5:1. Композиция
-    снимается со слайда-примера, а фон слайду назначает его layout — и это
-    законно разные слайды: на `vk_workspace` композиция со светлого примера
-    приезжала на чёрный фон, и текст получался чёрным по чёрному. Не
-    влезающий в порог цвет заменяется на тот, что читается.
+    Фон берётся по рамке (`grounds_of`), когда она известна: под ней бывает
+    и градиент, и шапка карточки, и плашка, которой у слота нет.
     """
-    # Фон бывает неизвестен: композиция снята с донора, а фон слайду назначает
-    # его layout. Судим тогда по яркости шаблона — ею фон и окажется.
-    judged = background or (Color(rgb="000000") if is_dark else Color(rgb="FFFFFF"))
-    needed = required_contrast(size_pt, bold, MIN_CONTRAST)
+    if box is not None:
+        return ink_over(grounds_of(box, container, slot, background, is_dark))
+    return ink_for(ground_under(slot, background, is_dark))
 
-    def readable(color: Color | None) -> bool:
-        if color is None:
-            return False
-        ratio = color.contrast_ratio(judged)
-        # Пара, которой шаблон пишет сам, — решение бренда; ей хватает
-        # порога крупного текста. Белый по фирменному синему `vk_education`
-        # (4.4:1) иначе становился чёрным — «чёрный текст на синих подложках».
-        return ratio >= needed or (
-            spec is not None
-            and spec.writes_on(color, judged)
-            and ratio >= required_contrast(LARGE_TEXT_PT, False, MIN_CONTRAST)
+
+# Роли, которые по смыслу и есть заголовок слайда или раздела: им
+# разрешено отличаться цветом. Всё остальное — основной текст, подписи,
+# таблицы, графики, колонтитулы — пишется одним цветом.
+_HEADING_ROLES = frozenset({SlotRole.TITLE})
+
+
+def _inks_of(element: Element) -> list[Color]:
+    """Все цвета, которыми сейчас написан текст этого элемента.
+
+    У таблицы их два: ячейки и шапка. Смотреть только на ячейки значит не
+    заметить белую шапку на акцентной заливке — а это ровно тот разнобой,
+    ради которого правило и вводится.
+    """
+    found: list[Color] = []
+    if element.text is not None:
+        found.extend(paragraph.style.color for paragraph in element.text.paragraphs)
+    if element.table is not None:
+        found.extend(
+            style.color
+            for style in (element.table.cell_style, element.table.header_style)
+            if style is not None
+        )
+    if element.chart is not None and element.chart.label_style is not None:
+        found.append(element.chart.label_style.color)
+    return found
+
+
+def _repaint(element: Element, ink: Color) -> Element:
+    """Тот же элемент, но весь его текст написан этим цветом.
+
+    Цвета рядов, заливок и маркеров не трогаются: правило про текст, а не
+    про графику. У таблицы перекрашиваются и ячейки, и шапка — шапка
+    таблицы заголовком слайда не является.
+    """
+    if element.text is not None:
+        element.text = element.text.model_copy(
+            update={
+                "paragraphs": [
+                    paragraph.model_copy(
+                        update={"style": paragraph.style.model_copy(update={"color": ink})}
+                    )
+                    for paragraph in element.text.paragraphs
+                ]
+            }
+        )
+    if element.table is not None:
+        updates = {}
+        if element.table.cell_style is not None:
+            updates["cell_style"] = element.table.cell_style.model_copy(
+                update={"color": ink}
+            )
+        if element.table.header_style is not None:
+            updates["header_style"] = element.table.header_style.model_copy(
+                update={"color": ink}
+            )
+        if updates:
+            element.table = element.table.model_copy(update=updates)
+    if element.chart is not None and element.chart.label_style is not None:
+        element.chart = element.chart.model_copy(
+            update={
+                "label_style": element.chart.label_style.model_copy(
+                    update={"color": ink}
+                )
+            }
+        )
+    return element
+
+
+def _fit_header_fill(element: Element, ink: Color, spec, judged: Color) -> None:
+    """Шапка таблицы обязана читаться тем же цветом, что и её ячейки.
+
+    Шаблон пишет по акцентной заливке белым, а ячейки — тёмным: в одной
+    таблице два цвета текста. Правило «один цвет на слайд» сильнее, и тогда
+    меняется не текст, а подложка: заливка шапки становится фоном слайда, а
+    акцент остаётся линейкой и подсветкой строк — оформление шаблона на
+    месте, а текст один.
+    """
+    if element.table is None or element.table.header_fill is None:
+        return
+    size, bold = _text_size_of(element)
+    if _readable_on(ink, element.table.header_fill, spec, judged, size, bold):
+        return
+    element.table = element.table.model_copy(update={"header_fill": judged})
+
+
+# Порог контраста для выбора цвета текста: 4.5:1 всему тексту, включая
+# заголовки. Послабление WCAG для крупного текста (3:1) здесь не
+# применяется — требование к результату строже стандарта.
+INK_CONTRAST = READABLE_RATIO
+
+BLACK = INK_BLACK
+WHITE = INK_WHITE
+
+
+def ink_contrast(ink: Color, ground: Color) -> float:
+    return ink.contrast_ratio(ground)
+
+
+def _text_size_of(element: Element) -> tuple[float, bool]:
+    """Кегль и начертание, по которым меряется порог контраста элемента."""
+    if element.text is not None and element.text.paragraphs:
+        style = element.text.paragraphs[0].style
+        return style.size_pt, style.bold
+    for style in (
+        element.table.cell_style if element.table is not None else None,
+        element.chart.label_style if element.chart is not None else None,
+    ):
+        if style is not None:
+            return style.size_pt, style.bold
+    return 0.0, False
+
+
+def _readable_on(
+    ink: Color,
+    under: Color | None,
+    spec=None,
+    judged: Color | None = None,
+    size_pt: float = 0.0,
+    bold: bool = False,
+) -> bool:
+    """Читается ли этот цвет на том, что лежит под текстом.
+
+    Порог один на весь текст — 4.5:1. Послабления WCAG для крупного текста
+    здесь нет намеренно: требование к результату не делит текст на крупный
+    и мелкий, а фирменная пара «цвет по подложке» больше не даёт поблажки —
+    цвет текста теперь и так только чёрный или белый.
+    """
+    ground = under or judged or WHITE
+    return ink.contrast_ratio(ground) >= INK_CONTRAST
+
+
+def _align_weight(elements: list[Element], fonts) -> None:
+    """Снимает начертание, которого у шрифта нет отдельным файлом.
+
+    Мерили тем, что нашлось; просить у рендера то, чего нет, — значит
+    разойтись с расчётом на ширинах и получить в PDF подставленный шрифт
+    вместо шаблонного.
+    """
+    if fonts is None or not hasattr(fonts, "has_face"):
+        return
+    for element in elements:
+        if element.text is None:
+            continue
+        element.text = element.text.model_copy(
+            update={
+                "paragraphs": [
+                    paragraph.model_copy(
+                        update={
+                            "style": paragraph.style.model_copy(
+                                update={
+                                    "bold": paragraph.style.bold
+                                    and fonts.has_face(
+                                        paragraph.style.font_family, True, False
+                                    ),
+                                    "italic": paragraph.style.italic
+                                    and fonts.has_face(
+                                        paragraph.style.font_family, False, True
+                                    ),
+                                }
+                            )
+                        }
+                    )
+                    for paragraph in element.text.paragraphs
+                ]
+            }
         )
 
-    own = (
-        slot.text_color or (slot.style.color if slot.style is not None else None)
-        if slot is not None
-        else None
-    )
-    candidates: list[Color | None] = []
-    # Обложка и финал — слайды шаблона целиком, с заменой только текста: их
-    # место пишется своим цветом (чёрный заголовок финала `vk_education`
-    # при синих заголовках содержательных слайдов).
-    if spec is not None and getattr(container, "id", None) in spec.bookend_ids:
-        candidates.append(own)
-    if spec is not None:
-        # Место на цветной подложке: чем шаблон пишет на ней самой (белым по
-        # синей карточке); затем — цвет роли на фоне этой яркости.
-        card = getattr(slot, "backdrop", None)
-        if card is not None:
-            candidates.extend(_written_on(card, spec))
-        candidates.append(spec.role_color(role, judged.luminance < 0.5))
-    candidates.append(own)
-    candidates.extend(
-        candidate.style.color
-        for candidate in container.slots
-        if candidate.role is role and candidate.style is not None
-    )
-    for candidate in candidates:
-        if readable(candidate):
-            return candidate
 
-    # Донорский цвет на нашем фоне не читается (или его нет). Прежде чем
-    # придумывать свой, спрашиваем палитру шаблона: колода обязана быть
-    # набрана его цветами, а не нашими. `#111111` остаётся крайним случаем —
-    # шаблоном, в палитре которого нет ни одного читаемого цвета текста.
-    if spec is not None:
-        from_palette = readable_text_color(spec.palette, background, is_dark)
-        if from_palette is not None:
-            return from_palette
-    # Ни один цвет шаблона не читается. Из белого и почти чёрного — тот, что
-    # контрастнее на этом фоне: на средне-яркой карточке признак «шаблон
-    # тёмный» выбирал не тот.
-    return max(
-        (Color(rgb="FFFFFF"), Color(rgb="111111")),
-        key=lambda color: color.contrast_ratio(judged),
-    )
+def _keep_text_clear(elements: list[Element], spec: TemplateSpec) -> None:
+    """Рамка данных не должна накрывать надписи слайда.
+
+    График вырастает в свободную область, а текстовый блок садится в место
+    композиции или в свободную полосу — решения принимаются в разном порядке
+    и по-разному, и вместе давали слайд, где подпись лежит внутри рамки
+    графика (`vk_tech`, слайд 4: 100 % рамки подписи). Читаемость там
+    держалась на том, что столбик в этом месте оказался низким.
+
+    Урезается именно рамка данных: у неё нет измеренного нами текста,
+    который пришлось бы мерить заново. Кегль подписи значения зависит от
+    ширины столбика, поэтому после урезки он пересчитывается тем же
+    правилом, что и при сборке. Если свободного места не остаётся, рамка
+    не трогается: пусть наложение назовёт аудит, а не молчаливая обрезка
+    превратит график в полоску.
+    """
+    texts = [element for element in elements if element.text is not None]
+    if not texts:
+        return
+    for element in elements:
+        if element.chart is None and element.table is None:
+            continue
+        crossing = [
+            other.box for other in texts if _overlaps(element.box, other.box)
+        ]
+        if not crossing:
+            continue
+        clear = _clear_of_boxes(element.box, crossing, spec)
+        if clear == element.box:
+            continue
+        element.box = clear
+        if element.chart is not None and element.chart.label_style is not None:
+            size, unit = _value_label(
+                clear,
+                element.chart.categories,
+                element.chart.series[0].values if element.chart.series else [],
+                element.chart.unit,
+                element.chart.label_style.size_pt,
+                spec,
+            )
+            element.chart = element.chart.model_copy(
+                update={
+                    "unit": unit,
+                    "label_style": element.chart.label_style.model_copy(
+                        update={"size_pt": size}
+                    ),
+                }
+            )
+
+
+def _one_ink(
+    elements: list[Element],
+    slide_index: int,
+    spec: TemplateSpec | None,
+    background: Color | None,
+    is_dark: bool,
+    container=None,
+) -> list[Issue]:
+    """Сводит весь текст слайда, кроме заголовка, к одному цвету.
+
+    Цвет выбирается не из палитры, а из двух — чёрного и белого: требование
+    к результату говорит «тёмный фон — белый текст, светлый — чёрный», и
+    порог 4.5:1 обязан держаться на **каждой** подложке слайда, а не в
+    среднем по нему.
+
+    Заголовок живёт по тому же правилу, но отдельно: он вправе стоять на
+    своей подложке (фирменная плашка) и получает цвет по ней.
+
+    Если ни чёрный, ни белый не проходят порог на всех подложках сразу —
+    значит на слайде и светлые, и тёмные блоки. Тогда цвет большинства
+    ставится везде, где он читается, остальные места сохраняют читаемый
+    свой, а конфликт называется находкой: перекрашивать текст в нечитаемый
+    ради единообразия хуже, чем признать, что так сверстан слайд.
+    """
+    body = [
+        element
+        for element in elements
+        if element.role not in _HEADING_ROLES
+        and (element.text is not None or element.table is not None or element.chart is not None)
+    ]
+    # Заголовок — своим цветом по своей подложке, и тоже только чёрным или
+    # белым: правило одно на весь текст.
+    judged = background or (BLACK if is_dark else WHITE)
+
+    def under(element: Element) -> list[Color]:
+        """Все фоны под этим блоком, а не один цвет-представитель.
+
+        Один представитель врал на градиенте: у обложки ЛЦТ2026 фон идёт от
+        почти чёрного фиолетового к светлой лаванде, «самый тяжёлый» из них
+        — середина, и по ней выбирался чёрный, нечитаемый на тёмном конце.
+
+        Пола может не быть вовсе — тогда это фон слайда. Без него таблица
+        `vk_education` видела под собой только чёрную полосу, пересёкшую её
+        рамку, и на белом слайде набиралась белым.
+        """
+        if container is None:
+            return [element.backdrop or judged]
+        floor, over = _grounds_seen(element.box, container)
+        return (floor or [element.backdrop or judged]) + [
+            color for ground in over for color in ground.colors
+        ]
+
+    for element in elements:
+        if element.role in _HEADING_ROLES:
+            _repaint(element, ink_over(under(element)))
+    if not body:
+        return []
+    grounds = [under(element) for element in body]
+
+    def readable_with(ink: Color) -> list[bool]:
+        return [
+            all(ink.contrast_ratio(ground) >= INK_CONTRAST for ground in seen)
+            for seen in grounds
+        ]
+
+    best: tuple[int, Color, list[bool]] | None = None
+    for ink in (ink_for(judged), BLACK, WHITE):
+        fits = readable_with(ink)
+        if all(fits):
+            for element in body:
+                _repaint(element, ink)
+                _fit_header_fill(element, ink, spec, judged)
+            return []
+        if best is None or sum(fits) > best[0]:
+            best = (sum(fits), ink, fits)
+
+    ink, fits = best[1], best[2]
+    for element, seen, ok in zip(body, grounds, fits, strict=True):
+        # Место, где цвет большинства не читается, получает читаемый — тоже
+        # чёрный или белый, а не фирменный: порог сильнее единообразия.
+        own = ink if ok else ink_over(seen)
+        _repaint(element, own)
+        _fit_header_fill(element, own, spec, judged)
+    left = {rgb for element in body for rgb in (c.rgb for c in _inks_of(element))}
+    if len(left) <= 1:
+        return []
+    return [
+        Issue(
+            check_id="template.text_color_split",
+            kind=CheckKind.DETERMINISTIC,
+            category=IssueCategory.TEMPLATE,
+            severity=Severity.WARNING,
+            slide_index=slide_index,
+            message=(
+                "текст слайда не сводится к одному цвету: под блоками и "
+                "светлые, и тёмные подложки, и один цвет не даёт 4.5:1 на "
+                f"всех (осталось цветов {len(left)}: {', '.join(sorted(left))})"
+            ),
+        )
+    ]
 
 
 def _align_of(slot) -> Align:
@@ -2002,6 +2622,110 @@ def _content_area(spec: TemplateSpec, container) -> Box:
     return Box(x=left, y=top, w=width, h=height)
 
 
+# Отступ вокруг защищённых зон, долей меньшей стороны слайда. Задаётся
+# конфигурацией (`layout.protected_padding_share`) — тем же приёмом, что и
+# предел параллельных конвертаций, чтобы интерфейс, CLI и тесты жили по
+# одному числу.
+_PROTECTED_PADDING_SHARE = [0.0]
+
+
+def configure_protected_padding(share: float) -> None:
+    """Задаёт отступ вокруг логотипов и оформления. Ноль — вплотную."""
+    _PROTECTED_PADDING_SHARE[0] = max(0.0, float(share))
+
+
+def protected_padding(spec: TemplateSpec) -> int:
+    """Отступ в EMU для этого шаблона: доля меньшей стороны слайда."""
+    side = min(spec.slide_width_emu, spec.slide_height_emu)
+    return round(side * _PROTECTED_PADDING_SHARE[0])
+
+
+def _protected_of(spec: TemplateSpec, container) -> list[Box]:
+    """Защищённые зоны композиции с отступом вокруг каждой.
+
+    Отступ прибавляется здесь, а не при разборе: шаблон говорит, где стоит
+    логотип, а насколько к нему нельзя подходить — наше решение, и оно
+    настраивается.
+    """
+    pad = protected_padding(spec)
+    boxes = list(getattr(container, "layout_obstacles", []) or [])
+    if not pad:
+        return boxes
+    grown = []
+    for box in boxes:
+        x = max(0, box.x - pad)
+        y = max(0, box.y - pad)
+        right = min(spec.slide_width_emu, box.right + pad)
+        bottom = min(spec.slide_height_emu, box.bottom + pad)
+        grown.append(Box(x=x, y=y, w=max(1, right - x), h=max(1, bottom - y)))
+    return grown
+
+
+def content_regions(spec: TemplateSpec, container) -> list[Box]:
+    """Свободное место набором областей, а не одним прямоугольником.
+
+    Сложный макет к одной рамке не сводится: картинка справа оставляет
+    колонку слева, полоса сверху — область под ней. Из области внутри полей
+    вычитается оформление макета (`Pattern.layout_obstacles`), и наружу
+    выходят прямоугольники, в которые можно ставить содержание.
+
+    Фон и подложки не вычитаются: по ним текст и должен лежать. Иначе слайд
+    с полноразмерной заливкой не принял бы ни одной надписи.
+    """
+    area = _content_area(spec, container)
+    blocked = _protected_of(spec, container)
+    if not blocked:
+        return [area]
+    regions = surfaces.free_regions(area, blocked)
+
+    # Подложка возвращает место, отнятое картинкой. Тёмная панель поверх
+    # фотографии — это и есть приглашение писать: без неё слайд с
+    # полноразмерным фото не принял бы ни одной надписи, хотя дизайнер
+    # оставил под текст ровно эту панель.
+    for panel in getattr(container, "layout_backdrops", []) or []:
+        inside = panel.intersection(area)
+        if inside is None:
+            continue
+        if any(inside.intersection(other) is not None for other in regions):
+            continue
+        # Панель сама может быть перекрыта мелким декором — вырезаем и его.
+        carved = surfaces.free_regions(
+            inside, [b for b in blocked if b.intersection(inside) is not None]
+        )
+        regions.extend(carved or [inside])
+
+    # Если оформление съело всё, честнее вернуть исходную область: решение
+    # принимает подбор места, а не молчаливое «ставить некуда».
+    return sorted(regions, key=lambda b: (-b.w * b.h, b.y, b.x)) or [area]
+
+
+def _within_free_regions(box: Box, spec: TemplateSpec, container, data: bool) -> Box:
+    """Та же рамка, обрезанная по месту, свободному от оформления макета.
+
+    Полоса свободного места считалась от полей шаблона и про украшения
+    макета не знала: на `vk_workspace` график садился слева от показателя —
+    ровно на стеклянный тор макета, и подписи столбцов читались поверх
+    бликов. `content_regions` уже разбирает площадь на области без декора;
+    здесь полоса пересекается с ними, и берётся наибольшая часть.
+
+    Если оформления нет, областей одна и рамка возвращается как была —
+    поведение шаблонов без декора не меняется.
+    """
+    regions = content_regions(spec, container)
+    if regions == [_content_area(spec, container)]:
+        # Оформления нет: область одна и совпадает с полями шаблона.
+        return box
+    parts = [part for part in (region.intersection(box) for region in regions) if part]
+    if not parts:
+        return box
+    if data:
+        # Графику мало быть в свободном месте: в нём надо ещё читаться.
+        roomy = [part for part in parts if _roomy_for_data(part, spec)]
+        if roomy:
+            return max(roomy, key=lambda part: part.area)
+    return max(parts, key=lambda part: part.area)
+
+
 def _free_band(
     spec: TemplateSpec,
     container,
@@ -2030,10 +2754,26 @@ def _free_band(
     # нашим содержанием, но место — их.
     if isinstance(container, Pattern):
         floor = _header_bottom(container, floor)
-    top = min(max(area.y, floor), area.bottom - _MIN_BAND_SHARE_DIVISOR)
-    remaining = max(_MIN_BAND_SHARE_DIVISOR, area.bottom - top)
+    # Полоса начинается ниже всего занятого. Подтягивать её вверх ради
+    # толщины нельзя: на `theme_only` так она залезала на блок, который
+    # уже стоял, и два текста ложились друг на друга.
+    # Свободного места может не остаться вовсе. Тогда полоса вырождается в
+    # щель, и текст в неё не влезет — об этом скажет находка о
+    # переполнении. Подтягивать полосу вверх, чтобы она стала толще, нельзя:
+    # она ляжет на блок, который уже стоит, и два текста окажутся друг на
+    # друге. Наложение хуже щели: щель видна фиттеру, наложение — только
+    # глазами.
+    top = min(max(area.y, floor), max(area.y, area.bottom - 1))
+    remaining = max(1, area.bottom - top)
     share = max(1, bands - index)
-    band = Box(x=area.x, y=top, w=area.w, h=max(1, remaining // share))
+    # Полоса тоньше строки — не место, а щель: на `finansy` в неё уезжал
+    # абзац, для которого «помещается 0 строк». Делим свободное на равные
+    # части, но ни одну не делаем ниже строки — насколько хватает места.
+    height = min(max(remaining // share, min(_MIN_BAND_SHARE_DIVISOR, remaining)), remaining)
+    band = _within_free_regions(
+        Box(x=area.x, y=top, w=area.w, h=max(1, height)),
+        spec, container, data,
+    )
     if not data or _roomy_for_data(band, spec):
         return band
     side = _side_region(spec, container, area, taken)
@@ -2060,7 +2800,9 @@ def _side_region(spec: TemplateSpec, container, area: Box, taken: list[Box]) -> 
     left = min(box.x for box in content) - gap
     right = max(box.right for box in content) + gap
     candidates = [
-        Box(x=x, y=top, w=w, h=area.bottom - top)
+        _within_free_regions(
+            Box(x=x, y=top, w=w, h=area.bottom - top), spec, container, data=True
+        )
         for x, w in ((area.x, left - area.x), (right, area.right - right))
         if w > 0
     ]
@@ -2105,7 +2847,12 @@ def _data_element(
             # подписи легли вертикальной кашей.
             body = role_typical(spec, SlotRole.BODY) or style.size_pt
             label = style.model_copy(
-                update={"size_pt": max(CHART_MIN_PT, min(style.size_pt, body))}
+                update={
+                    "size_pt": max(
+                        _data_floor(spec, SlotRole.CHART),
+                        min(style.size_pt, body),
+                    )
+                }
             )
             single = len(series) == 1
             unit = series_unit(block.series_ids, pack)
@@ -2149,7 +2896,13 @@ def _data_element(
 
     if role is SlotRole.TABLE:
         body = role_typical(spec, SlotRole.BODY) or style.size_pt
-        cell = style.model_copy(update={"size_pt": max(CHART_MIN_PT, min(style.size_pt, body))})
+        cell = style.model_copy(
+            update={
+                "size_pt": max(
+                    _data_floor(spec, SlotRole.TABLE), min(style.size_pt, body)
+                )
+            }
+        )
         brand = _brand_colors(spec, background, is_dark)
         table = _table_content(block, pack, cell)
         if table is not None:
@@ -2392,8 +3145,15 @@ def _free_region(
 # с главными.
 MUTED_SATURATION = 0.18
 
-# Мельче этого подписи графика не читаются с проектора.
+# Мельче этого подписи графика не читаются с проектора. Нижняя граница
+# роли из конфига (`type.min_size_pt`) сильнее: она задана для этого
+# шаблона и пересчитана по высоте слайда.
 CHART_MIN_PT = 10.0
+
+
+def _data_floor(spec: TemplateSpec, role: SlotRole) -> float:
+    """Ниже какого кегля не опускаются подписи графика и ячейки таблицы."""
+    return max(CHART_MIN_PT, readable_floor(spec, role))
 
 # Порог контраста для заливок графика: нетекстовая графика по WCAG — 3:1.
 # Порог текста 4.5 отсекал фирменный синий на белом (4.2), и столбики
@@ -2642,6 +3402,48 @@ def _overflow_issue(
     )
 
 
+def _readable_seat(
+    seats,
+    lines: list[str],
+    spec: TemplateSpec,
+    metrics: FontMetrics | None,
+    ladders: dict[SlotRole, list[float]] | None,
+    over_picture: bool,
+) -> bool:
+    """Годится ли это место служебного слайда под этот текст.
+
+    Обложка и финал шаблона — не резиновые. Донор держит там одну-две
+    строки, и втиснуть в ту же рамку четыре значит набрать их вдвое мельче
+    шкалы. Если место вдобавок лежит на картинке макета, мелкий текст на ней
+    просто не читается: ровно это и получалось на обложке `vk_tech`.
+
+    Порог — три пятых типичного кегля роли в этом шаблоне: тот же, по
+    которому вёрстка отличает «читаемо» от «влезает хоть как-то». Место, на
+    котором текст не набирается даже так, местом не считается, и блок уходит
+    в структурный отказ (`layout.text_without_place`), а не мельчает молча.
+    """
+    if not seats or metrics is None or not ladders:
+        return True
+    if not over_picture:
+        # Место не на картинке — решает фиттер, как раньше. Ужесточать
+        # общий случай этот этап не должен: у служебных слайдов и без
+        # картинки свои резоны держать мелкую подпись.
+        return True
+    for slot, seat_lines in seats:
+        text = " ".join(seat_lines or lines)
+        typical = role_typical(spec, slot.role)
+        ladder = ladders.get(slot.role) or []
+        if not typical or not ladder:
+            continue
+        floor = typical * 0.6
+        allowed = [size for size in ladder if size >= floor] or [ladder[-1]]
+        declared = slot.style.size_pt if slot.style is not None else allowed[-1]
+        start = max(allowed[0], min(declared, allowed[-1]))
+        if not fit_size(text, _metrics_of(metrics, slot), slot.box, allowed, start).fits:
+            return False
+    return True
+
+
 def _no_place_issue(slide_index: int, block_id: str, box: Box) -> Issue:
     return Issue(
         check_id="layout.text_without_place",
@@ -2658,7 +3460,7 @@ def _no_place_issue(slide_index: int, block_id: str, box: Box) -> Issue:
             kind=FixKind.ASSISTED,
             description="убрать текст с титула или финала либо перенести его на соседний слайд",
             action="shorten_or_split",
-            params={"slide_index": slide_index},
+            params={"slide_index": slide_index, "block_id": block_id},
         ),
     )
 
@@ -2683,7 +3485,13 @@ def _speaker_elements(
         else role_typical(spec, SlotRole.BODY)
     )
     color = _text_color(
-        pattern, SlotRole.SPEAKER, pattern.is_dark, _under(speaker, None), spec, slot=speaker
+        pattern,
+        SlotRole.SPEAKER,
+        pattern.is_dark,
+        _under(speaker, None),
+        spec,
+        slot=speaker,
+        box=speaker.box,
     )
     style = TextStyle(
         font_family=font_family, size_pt=size or 12.0, color=color, align=_align_of(speaker)
@@ -2742,13 +3550,32 @@ def build_slide_ir(
 
     # ── Заголовок ────────────────────────────────────────────────────────
     title_slot = _title_slot(container)
+    # Защищённые зоны считаются один раз на слайд: логотипы, полосы
+    # оформления, колонтитулы — с отступом из конфигурации.
+    protected_zones = _protected_of(spec, container)
     title_box = title_slot.box if title_slot else _content_area(spec, container)
+    title_box, title_plate = _settled(
+        _outside_protected(_title_area(pattern, title_box), protected_zones),
+        container,
+        protected_zones,
+    )
     title_ladder = ladders[SlotRole.TITLE]
     title_declared = (
         title_slot.style.size_pt
         if title_slot is not None and title_slot.style is not None
         else (title_ladder[-1] if title_ladder else 18.0)
     )
+    # Предел кегля у шапки слайда считается от её собственного места, а не от
+    # минимума роли по всему шаблону: у `vk_tech` заголовки объявлены от 18 до
+    # 54 pt, и заголовок в 54 pt разрешалось ужать втрое — до микроподписи.
+    #
+    # Тело текста живёт по пределу роли. Проба показала, почему: место
+    # «4 системы» на `vk_workspace` объявлено 54 pt под одно слово, а наш абзац
+    # туда не влезает и на трёх пятых от него — текст выезжал за край слайда
+    # поверх оформления. Пока нет чем ответить на «не влезает» — сменой
+    # композиции или сокращением, — держать иерархию ценой выехавшего текста
+    # нечестно: это задача цикла исправления (группа 6).
+    title_ladder = ladder_for_slot(spec, SlotRole.TITLE, title_declared) or title_ladder
     title_start = strategy.start_size(title_ladder, title_declared)
     title_id = f"s{plan_slide.index}_title"
 
@@ -2758,7 +3585,9 @@ def build_slide_ir(
     title_used = 0
     if metrics is not None:
         fit = fit_size(
-            plan_slide.takeaway_title, metrics, title_box, title_ladder, title_start
+            plan_slide.takeaway_title,
+            _metrics_of(metrics, title_slot, bold=True),
+            title_box, title_ladder, title_start,
         )
         title_size = fit.size_pt
         title_steps = fit.steps_down
@@ -2783,7 +3612,12 @@ def build_slide_ir(
             role=SlotRole.TITLE,
             box=title_box,
             provenance=provenance,
-            backdrop=_under(title_slot, None),
+            backdrop=(
+                title_plate.color
+                if title_plate is not None
+                else _backdrop_of(title_box, container, title_slot)
+            ),
+            plate=title_plate,
             text=TextContent(
                 scale_steps_down=title_steps,
                 truncated=title_overflowed,
@@ -2793,12 +3627,14 @@ def build_slide_ir(
                     Paragraph(
                         text=plan_slide.takeaway_title,
                         style=TextStyle(
-                            font_family=font_family,
+                            font_family=_family_of(title_slot, font_family),
                             size_pt=title_size,
                             bold=True,
                             align=_align_of(title_slot),
                             valign=_valign_of(title_slot),
-                            color=_text_color(
+                            color=ink_for(title_plate.color)
+                            if title_plate is not None
+                            else _text_color(
                                 container,
                                 SlotRole.TITLE,
                                 is_dark,
@@ -2807,6 +3643,7 @@ def build_slide_ir(
                                 slot=title_slot,
                                 size_pt=title_size,
                                 bold=True,
+                                box=title_box,
                             ),
                         ),
                     )
@@ -2906,6 +3743,16 @@ def build_slide_ir(
             # Таблица из прямоугольников — надписи по ячейкам, а не `a:tbl`.
             role = SlotRole.BODY
         slot = seats[0][0] if seats else None
+        if slot is not None and bookend:
+            # Место есть, но годится ли оно. Служебный слайд шаблона рассчитан
+            # на короткую строку; вместить в него абзац можно только кеглем
+            # мельче читаемого, а поверх картинки макета — тем более.
+            on_picture = any(
+                _share(slot.box, picture) >= 0.6
+                for picture in (pattern.layout_obstacles if pattern else [])
+            )
+            if not _readable_seat(seats, lines, spec, metrics, ladders, on_picture):
+                slot = None
         if slot is None and bookend:
             # У обложки или финала шаблона нет места под этот текст. Класть
             # его в свободную полосу поверх оформления нельзя, в подпись
@@ -2924,13 +3771,31 @@ def build_slide_ir(
             box = _free_band(
                 spec, container, homeless, bands, taken, data=role in _DATA_ROLES
             )
+            # Полоса шире любого места донора и берёт всё, что в ней лежит:
+            # на `vk_education` она накрыла точки легенды донора, и синий с
+            # розовым кружком оказались под нашей строкой. Та же обрезка по
+            # графике донора, что у мест композиции.
+            if pattern is not None and pattern.decor:
+                box = _clear_of_decor(box, pattern.decor)
             homeless += 1
         else:
             box = slot.box
         element_id = f"s{plan_slide.index}_b{position}"
-        placed = [
-            (seat.box if seat is not None else box, text) for seat, text in seats
+        settled = [
+            _settled(
+                _outside_protected(
+                    seat.box if seat is not None else box, protected_zones
+                ),
+                container,
+                protected_zones,
+            )
+            for seat, _ in seats
         ]
+        placed = [
+            (seat_box, text)
+            for (seat_box, _plate), (_seat, text) in zip(settled, seats, strict=True)
+        ]
+        plates = [plate for _box, plate in settled]
         if metrics is not None:
             fits, starts = _fit_block(
                 [(seat, seat_box, text) for (seat, _), (seat_box, text) in zip(
@@ -2954,7 +3819,9 @@ def build_slide_ir(
         # Цвет — каждого места и по его подложке: карточки одного ряда бывают
         # разного цвета. Порог контраста — по кеглю, которым место набрано.
         colors = [
-            _text_color(
+            ink_for(plates[number].color)
+            if plates[number] is not None
+            else _text_color(
                 container,
                 # Блок, разделённый по местам (число и подпись), пишется
                 # цветом роли каждого места.
@@ -2964,6 +3831,7 @@ def build_slide_ir(
                 spec,
                 slot=seat,
                 size_pt=fits[number].size_pt if number < len(fits) else 0.0,
+                box=placed[number][0],
             )
             for number, (seat, _) in enumerate(seats)
         ]
@@ -2976,11 +3844,25 @@ def build_slide_ir(
         # в свободную область ниже заголовка, в полях шаблона, не заходя на
         # соседние блоки. Последний блок — чтобы не занять место следующих.
         if role in _DATA_ROLES and slot is not None:
+            # Места, которые ещё понадобятся соседним блокам, данным не
+            # достаются: на `vk_tech` место донора под график занимало
+            # почти весь слайд, и абзац следом садился внутрь его рамки.
+            # Урезаем до того, как считаются подписи: их кегль зависит от
+            # рамки, и менять её после измерения нельзя.
+            if position != last:
+                box = _clear_of_boxes(box, _free_boxes(free_slots, taken), spec)
             top = _header_bottom(pattern, title_bottom) + spec.slide_height_emu // DATA_GAP_SHARE
             if position == last:
+                # Расти график может только в место, свободное от оформления
+                # макета: иначе он вырастал ровно на украшение — столбцы
+                # поверх стеклянного тора `vk_workspace`.
                 box = _free_region(
-                    box, _above_service(_content_area(spec, container), pattern, spec), top,
-                    others, spec,
+                    box,
+                    _within_free_regions(
+                        _above_service(_content_area(spec, container), pattern, spec),
+                        spec, container, data=True,
+                    ),
+                    top, others, spec,
                 )
             elif box.y < top:
                 box = box.model_copy(update={"y": top, "h": max(1, box.bottom - top)})
@@ -2988,9 +3870,24 @@ def build_slide_ir(
                 # Место донора под данными выше шапки (фото-баннер над
                 # заголовком): обрезанное по шапке, оно схлопывалось в
                 # график высотой в 1 EMU. Тогда — свободная полоса.
-                band = _free_band(spec, container, 0, 1, [title_taken, *others], data=True)
+                #
+                # Полоса берётся не поверх мест, которые ещё понадобятся
+                # соседним блокам: график, занявший весь слайд, не оставлял
+                # абзацу ничего, и тот садился внутрь графика — на `vk_tech`
+                # подпись лежала целиком в его рамке.
+                reserved = [] if position == last else _free_boxes(free_slots, taken)
+                band = _free_band(
+                    spec, container, 0, 1, [title_taken, *others, *reserved], data=True
+                )
                 if _roomy_for_data(band, spec):
                     box = band
+
+        # Занятой считается та рамка, которую место заняло в итоге, а не
+        # та, с которой начинало: данные растут и переезжают в свободную
+        # полосу, и следующий блок обязан знать, где они встали. Иначе на
+        # `theme_only` абзац ложился поверх полосы, взятой графиком.
+        if box not in taken:
+            taken.append(box)
 
         # Числовой ряд и таблица становятся нативными объектами, а не
         # пересказом строками: ТЗ засчитывает только `c:chart` и `a:tbl`, и
@@ -3001,7 +3898,7 @@ def build_slide_ir(
             role,
             box,
             TextStyle(
-                font_family=font_family,
+                font_family=_family_of(seats[0][0] if seats else None, font_family),
                 size_pt=fits[0].size_pt if fits else start,
                 color=color,
             ),
@@ -3023,6 +3920,13 @@ def build_slide_ir(
         )
         if native is not None:
             elements.append(native)
+            # График и таблица вырастают из своего места в свободную область,
+            # и занятым до сих пор считалось место донора, а не то, что
+            # график занял на самом деле. Следующий блок садился внутрь
+            # графика: на `vk_tech` подпись слайда лежала целиком в его
+            # рамке. Занято — то, что занято.
+            if native.box not in taken:
+                taken.append(native.box)
             continue
 
         for number, (seat_box, text) in enumerate(placed):
@@ -3036,7 +3940,9 @@ def build_slide_ir(
                     )
                 )
             style = TextStyle(
-                font_family=font_family,
+                font_family=_family_of(seats[number][0], font_family),
+                bold=_bold_of(seats[number][0]),
+                italic=_italic_of(seats[number][0]),
                 size_pt=fit.size_pt if fit is not None else starts[number],
                 color=colors[number],
                 align=_align_of(seats[number][0]),
@@ -3062,7 +3968,9 @@ def build_slide_ir(
                             is_dark,
                             _under(seats[number][0], background),
                             spec,
+                            slot=seats[number][0],
                             size_pt=style.size_pt,
+                            box=seat_box,
                         )
                     }
                 )
@@ -3074,7 +3982,12 @@ def build_slide_ir(
                     role=seat.role if seat is not None else role,
                     box=seat_box,
                     provenance=provenance,
-                    backdrop=_under(seats[number][0], None),
+                    backdrop=(
+                        plates[number].color
+                        if plates[number] is not None
+                        else _backdrop_of(seat_box, container, seats[number][0])
+                    ),
+                    plate=plates[number],
                     text=TextContent(
                         paragraphs=[
                             Paragraph(text=line, style=line_style, bullet=len(text) > 1)
@@ -3096,8 +4009,20 @@ def build_slide_ir(
     if bookend:
         elements.extend(_speaker_elements(pattern, pack, plan_slide.index, font_family, spec))
 
+    # Начертание — то, которое в шрифте есть: просить у рендера полужирный
+    # там, где его нет, значит получить синтетический жир или чужой шрифт.
+    _align_weight(elements, metrics)
+    # Данные не накрывают текст: рамка графика или таблицы урезается до
+    # места, свободного от надписей.
+    _keep_text_clear(elements, spec)
+    # Весь текст слайда, кроме заголовка, — одним цветом.
+    issues.extend(
+        _one_ink(elements, plan_slide.index, spec, background, is_dark, container)
+    )
+
     slide = SlideIR(
         index=plan_slide.index,
+        plan_index=plan_slide.index,
         layout_id=pattern.layout_id if pattern is not None else layout.id,
         pattern_id=pattern.id if pattern is not None else None,
         donor_slide_index=pattern.donor_slide_index if pattern is not None else None,
@@ -3116,6 +4041,9 @@ def build_deck_ir(
     strategy: Strategy | None = None,
     pack=None,
     siblings: dict[str, dict[int, str]] | None = None,
+    allow_extra_slides: bool = True,
+    max_slides: int | None = None,
+    substitution_slack: float = 1.0,
 ) -> tuple[DeckIR, list[Issue]]:
     """Колода одного варианта и находки, которые вёрстка завела о себе сама.
 
@@ -3150,7 +4078,16 @@ def build_deck_ir(
             update={"patterns": [_without_photos(pattern, spec) for pattern in spec.patterns]}
         )
     font_family = spec.fonts[0].family if spec.fonts else "Arial"
-    metrics = metrics_for_spec(spec).metrics
+    # Метрики разрешаются на каждую пару «гарнитура + начертание», а не одни
+    # на колоду: заголовок шаблона набран заголовочной гарнитурой темы и
+    # полужирным, и мерить его основной гарнитурой обычного начертания
+    # значит обещать, что текст влезет, когда он не влезает.
+    fonts = Fonts(spec, substitution_slack)
+    metrics = fonts if fonts.usable else None
+    # Основные гарнитуры шаблона — первые по значимости: ими он и набирает
+    # заголовки и текст. `spec.fonts` уже отсортирован по употреблению.
+    principal = frozenset(token.family for token in spec.fonts[:2])
+    principal_token = _PRINCIPAL_FONTS.set(principal)
     # Лестница у каждой роли своя: предел «мельче нельзя» шаблон задаёт для
     # заголовка и для тела текста по-разному.
     ladders = {role: ladder_for_role(spec, role) for role in SlotRole}
@@ -3165,22 +4102,43 @@ def build_deck_ir(
     ]
     mine: dict[int, str] = {}
     sections = _sections(plan)
+    # Сколько слайдов плана ещё не разобрано, считая текущий: по ним
+    # считается минимальная длина колоды, ниже которой она не станет.
+    left = len(plan.slides)
     for plan_slide in plan.slides:
         plan_slide = _mixed_units_as_table(
             _tables_as_series(_heading_as_subtitle(spec, _figure_first(plan_slide)), pack),
             pack,
         )
         avoid = {chosen[plan_slide.index] for chosen in others if plan_slide.index in chosen}
+        # Потолок ТЗ. Лишний слайд вёрстка добавляет, только пока колода
+        # остаётся в его пределах: на `finansy` план из 13 слайдов и три
+        # переноса давали 16 при требовании «10–15».
+        room = None if max_slides is None else max_slides - (len(slides) + left)
         built, found = _slides_for(
             spec, plan_slide, strategy, metrics, ladders, font_family, used, pack, avoid,
-            sections,
+            sections, allow_extra_slides,
         )
+        if room is not None and len(built) - 1 > room:
+            # Лишних слайдов больше нет: собираем этот неделёным, а
+            # переполнение остаётся находкой.
+            tight, tight_found = _slides_for(
+                spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+                avoid, sections, False,
+            )
+            # Потолок уступает одному — слайду, который нельзя прочитать.
+            # График, которому досталась полоса в 1 EMU, колоду не спасает
+            # тем, что она короче: лучше лишний слайд и находка о нём.
+            if not any(_cramped_data(one, spec) for one in tight):
+                built, found = tight, tight_found
+        left -= 1
         if built and built[0].pattern_id:
             mine[plan_slide.index] = built[0].pattern_id
         slides.extend(built)
         issues.extend(found)
         used.update(s.pattern_id for s in built if s.pattern_id)
 
+    _PRINCIPAL_FONTS.reset(principal_token)
     if siblings is not None:
         siblings[variant_name] = mine
 
@@ -3408,7 +4366,9 @@ def _cover_sections(
                     if slot.style is not None
                     else (ladder[-1] if ladder else 12.0)
                 )
-                if not fit_size(" ".join(lines), metrics, slot.box, [declared], declared).fits:
+                if not fit_size(
+                    " ".join(lines), _metrics_of(metrics, slot), slot.box, [declared], declared
+                ).fits:
                     return None
         return block
     return None
@@ -3446,11 +4406,12 @@ def _subtitle_element(
         if slot.style is not None
         else _undeclared(spec, SlotRole.SUBTITLE, ladder)
     )
+    ladder = ladder_for_slot(spec, slot.role, declared) or ladder
     start = strategy.start_size(ladder, declared)
     element_id = f"s{plan_slide.index}_subtitle"
     size, steps, overflowed, capacity, used = start, 0, False, 0, 0
     if metrics is not None:
-        fit = fit_size(plan_slide.subtitle, metrics, slot.box, ladder, start)
+        fit = fit_size(plan_slide.subtitle, _metrics_of(metrics, slot), slot.box, ladder, start)
         size, steps, overflowed = fit.size_pt, fit.steps_down, not fit.fits
         capacity, used = fit.capacity_lines, fit.lines
         if overflowed:
@@ -3463,7 +4424,7 @@ def _subtitle_element(
         role=SlotRole.SUBTITLE,
         box=slot.box,
         provenance=provenance,
-        backdrop=_under(slot, None),
+        backdrop=_backdrop_of(slot.box, container, slot),
         text=TextContent(
             scale_steps_down=steps,
             truncated=overflowed,
@@ -3473,7 +4434,9 @@ def _subtitle_element(
                 Paragraph(
                     text=plan_slide.subtitle.strip(),
                     style=TextStyle(
-                        font_family=font_family,
+                        font_family=_family_of(slot, font_family),
+                        bold=_bold_of(slot),
+                        italic=_italic_of(slot),
                         size_pt=size,
                         align=_align_of(slot),
                         valign=_valign_of(slot),
@@ -3485,6 +4448,7 @@ def _subtitle_element(
                             spec,
                             slot=slot,
                             size_pt=size,
+                            box=slot.box,
                         ),
                     ),
                 )
@@ -3598,6 +4562,7 @@ def _slides_for(
     pack=None,
     avoid: set[str] | None = None,
     sections: list[str] | None = None,
+    allow_extra_slides: bool = True,
 ) -> tuple[list[SlideIR], list[Issue]]:
     """Слайд, а если он переполнен и деление помогает — два.
 
@@ -3628,8 +4593,85 @@ def _slides_for(
     # карточками — полдюйма высоты), — такая же причина делить, как
     # переполнение: у половины с одним графиком место найдётся.
     cramped = _cramped_data(slide, spec)
-    # Обложку и финал не делят: вторая обложка — не выход.
-    if (not content_overflow and not cramped) or slide.pattern_id in spec.bookend_ids:
+    # Обложку и финал не делят: вторая обложка — не выход. Но блок, которому
+    # на служебном слайде не нашлось читаемого места, нельзя и потерять:
+    # он уезжает на отдельный содержательный слайд следом.
+    if slide.pattern_id in spec.bookend_ids:
+        moved = [
+            issue.fix.params.get("block_id")
+            for issue in issues
+            if issue.check_id == "layout.text_without_place"
+        ]
+        blocks = [block for block in plan_slide.blocks if block.id in moved]
+        if blocks and not allow_extra_slides:
+            # Число слайдов задано пользователем: добавить некуда, и
+            # выбрасывать текст нельзя. Находка остаётся структурной
+            # невозможностью разместить — с ней разбирается человек.
+            return [slide], issues
+        if blocks:
+            # Шапка блока становится заголовком слайда, и в самом блоке её
+            # быть уже не должно — иначе строка стоит дважды.
+            promoted = next((b.heading for b in blocks if b.heading), "")
+            blocks = [
+                b.model_copy(update={"heading": ""}) if b.heading == promoted else b
+                for b in blocks
+            ]
+            carried = plan_slide.model_copy(
+                update={
+                    "blocks": blocks,
+                    "intent": SlideIntent.CONTEXT,
+                    # Заголовок берём у самого блока, если он есть: выдумывать
+                    # за автора нечего, а повторять заголовок обложки незачем.
+                    "takeaway_title": promoted or plan_slide.takeaway_title,
+                    "subtitle": "",
+                    "figures": [],
+                }
+            )
+            extra, extra_issues = build_slide_ir(
+                spec, carried, strategy, metrics, ladders, font_family, used, pack,
+                (avoid or set()) | set(spec.bookend_ids), sections,
+            )
+            # С обложки текст уходит на слайд следом, с финала — на слайд
+            # перед ним. За финалом не идёт ничего: поставленный после него
+            # слайд перестаёт быть финалом, и «Спасибо за внимание» оказывается
+            # в середине. Порядок содержания при этом не меняется — блок
+            # принадлежит тому же слайду плана.
+            order = (
+                [slide, extra]
+                if slide.pattern_id == spec.cover_pattern_id
+                else [extra, slide]
+            )
+            # Находка остаётся: у служебного слайда места действительно не
+            # нашлось, и человек должен об этом знать. Меняется только
+            # рассказ о последствии — текст не потерян, а переехал.
+            told = [
+                issue.model_copy(
+                    update={
+                        "message": issue.message.replace(
+                            "он не вёрстан",
+                            "он перенесён на отдельный слайд следом",
+                        )
+                    }
+                )
+                if issue.check_id == "layout.text_without_place"
+                else issue
+                for issue in issues
+            ]
+            return order, told + extra_issues
+        return [slide], issues
+    if not content_overflow and not cramped:
+        return [slide], issues
+    if not allow_extra_slides:
+        # Делить нельзя: слайдов больше не будет. Переполнение остаётся
+        # названным в находках, а не лечится лишним слайдом.
+        if cramped:
+            # А вот тесный график лечится не делением, а композицией, где
+            # для него есть место, — и её выбрать можно: слайд остаётся
+            # один. Без этого график оставался высотой в 1 EMU.
+            return _roomier(
+                spec, plan_slide, strategy, metrics, ladders, font_family, used, pack,
+                avoid, sections, slide, issues,
+            )
         return [slide], issues
 
     parts = split_blocks(list(plan_slide.blocks))

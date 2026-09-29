@@ -873,35 +873,36 @@ def test_list_gets_a_place_per_item_when_the_template_has_one(specs, live_plan):
                 )
 
 
-def test_titles_are_written_in_the_colour_the_template_uses_for_titles(specs, plan):
-    """C6: цвет роли — тот, которым шаблон её пишет на большинстве слайдов.
+def test_titles_are_black_or_white_by_their_own_background(specs, plan):
+    """Заголовок — чёрный или белый по фактическому фону под ним.
 
-    `vk_education` пишет заголовки синим на 35 слайдах из 36 светлых, а
-    колода выходила с чёрными: синий 4.4:1 не проходил порог мелкого текста,
-    хотя заголовок крупный, и цвет брался у места донора, а не у роли.
+    Прежде здесь проверялось обратное: заголовок писался фирменным цветом
+    роли, если тот проходил порог крупного текста. Требование к результату
+    сильнее: тёмный фон — белый текст, светлый — чёрный, и порог один на
+    весь текст — 4.5:1. Фирменный цвет остаётся у логотипов, заливок и
+    рядов данных, но не у букв.
     """
-    from deckwright.schemas import required_contrast
+    from deckwright.layout.matcher import INK_CONTRAST, ink_for
 
     cfg = load_config(CONFIG)
+    checked = 0
     for name, spec in specs:
         deck, _ = build_deck_ir(spec, plan, cfg.variant("balanced"))
         for slide in deck.slides:
-            if slide.pattern_id in spec.bookend_ids or slide.background is None:
+            if slide.background is None:
                 continue
             title = next((e for e in slide.all_elements() if e.role is SlotRole.TITLE), None)
             if title is None or title.text is None:
                 continue
             ground = title.backdrop or slide.background
-            wanted = spec.role_color(SlotRole.TITLE, ground.luminance < 0.5)
             style = title.text.paragraphs[0].style
-            if wanted is None or wanted.contrast_ratio(ground) < required_contrast(
-                style.size_pt, style.bold
-            ):
-                continue
-            assert style.color.rgb == wanted.rgb, (
+            checked += 1
+            assert style.color.rgb == ink_for(ground).rgb, (
                 f"{name}: заголовок слайда {slide.index} цветом {style.color.rgb}, "
-                f"шаблон пишет заголовки {wanted.rgb}"
+                f"на фоне {ground.rgb} читается {ink_for(ground).rgb}"
             )
+            assert style.color.contrast_ratio(ground) >= INK_CONTRAST
+    assert checked, "ни одного заголовка не проверили"
 
 
 def _slot(sid: str, role: SlotRole, x: float, y: float, w: float, h: float, text: str = ""):
@@ -1170,3 +1171,179 @@ def test_figure_in_the_donors_ring_is_not_a_split():
 
     assert not _figure_unsplit(pattern([]), _Spec, slide, strategy)
     assert _figure_unsplit(pattern([ring]), _Spec, slide, strategy)
+
+
+# ── Фон под текстом: градиент, двухцветная карточка, фон-картинка ───────────
+
+
+def _ground(x: float, y: float, w: float, h: float, *colors: str, z: int = 0):
+    from deckwright.schemas import Ground
+
+    inch = 914400
+    return Ground(
+        box=Box(x=int(x * inch), y=int(y * inch), w=int(w * inch), h=int(h * inch)),
+        colors=[Color(rgb=value) for value in colors],
+        z=z,
+    )
+
+
+def _box(x: float, y: float, w: float, h: float) -> Box:
+    inch = 914400
+    return Box(x=int(x * inch), y=int(y * inch), w=int(w * inch), h=int(h * inch))
+
+
+class _Grounded:
+    """Композиция, от которой вёрстке нужны только заливки донора."""
+
+    def __init__(self, grounds):
+        self.grounds = grounds
+
+
+def test_gradient_card_is_judged_by_its_hardest_stop():
+    """Цвет текста на градиенте держит порог на всей заливке, а не в середине.
+
+    Карточки `vk_workspace` залиты `00AEE8`→`0077FF`. Пока разбор читал
+    только `a:solidFill`, подложка выходила `None`, цвет выбирался по
+    чёрному фону слайда, и по яркому голубому писалось белым — 2.8:1 на
+    отрисованной странице. По обоим опорным цветам читается чёрный.
+    """
+    from deckwright.layout.matcher import grounds_of, ink_over
+
+    card = _Grounded([_ground(0, 0, 4, 3, "00AEE8", "0077FF")])
+    text = _box(0.2, 0.2, 3.6, 0.5)
+    grounds = grounds_of(text, card, None, Color(rgb="000000"), True)
+
+    assert {color.rgb for color in grounds} == {"00AEE8", "0077FF"}
+    ink = ink_over(grounds)
+    assert ink.rgb == "000000"
+    assert all(ink.contrast_ratio(ground) >= MIN_CONTRAST for ground in grounds)
+
+
+def test_text_settles_below_a_two_tone_card_header():
+    """Рамка на двух фонах отступает под шапку карточки, а не красится.
+
+    Карточка `vk_workspace` — чёрная с голубой градиентной шапкой. Белым
+    первые строки лягут на голубое, чёрным остальные — на чёрное: читаемого
+    цвета у такой рамки нет, и решается это геометрией.
+    """
+    from deckwright.layout.matcher import _settled, readable_ink
+
+    card = _Grounded([
+        _ground(0, 2, 4, 4, "000000", z=1),
+        _ground(0, 2, 4, 0.8, "00AEE8", "0077FF", z=2),
+    ])
+    # Шапка занимает больше трети рамки: полоса, пересёкшая её краем, —
+    # это декор, и фоном текста она не считается (`_OVER_SHARE`).
+    text = _box(0.2, 2.2, 3.6, 1.6)
+    assert readable_ink(
+        [Color(rgb="000000"), Color(rgb="00AEE8")]
+    ) is None, "проба бессмысленна, если фоны не спорят"
+
+    settled, plate = _settled(text, card)
+
+    assert plate is None, "здесь надо отступить, а не растить подложку"
+    assert settled.y >= card.grounds[1].box.bottom, "текст остался на шапке"
+    assert settled.w == text.w, "ширина места потеряна зря"
+
+
+def test_a_card_hides_the_background_picture_under_it():
+    """Порядок отрисовки решает: карточка поверх фона закрывает его.
+
+    Фон-картинка снимается клетками и лежит ниже всего (`z = -1`). Текст на
+    белой карточке поверх тёмной картинки читается по карточке, иначе на
+    белом получился бы белый текст.
+    """
+    from deckwright.layout.matcher import grounds_of, ink_over
+
+    slide = _Grounded([
+        _ground(0, 0, 4, 4, "2B053F", z=-1),
+        _ground(0, 0, 4, 4, "531275", z=-1),
+        _ground(0.5, 1, 3, 2, "FFFFFF", z=3),
+    ])
+    text = _box(0.7, 1.2, 2.6, 1.6)
+
+    grounds = grounds_of(text, slide, None, None, True)
+
+    assert [color.rgb for color in grounds] == ["FFFFFF"]
+    assert ink_over(grounds).rgb == "000000"
+
+
+def _picture_background(image):
+    """Фон-картинка так, как её видит разбор: узел `p:bg` и часть с байтами."""
+    import io
+
+    from lxml import etree
+
+    A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    bg = etree.fromstring(
+        f'<p:bg xmlns:p="{P}" xmlns:a="{A}" xmlns:r="{R}"><p:bgPr>'
+        f'<a:blipFill><a:blip r:embed="rId1"/></a:blipFill></p:bgPr></p:bg>'
+    )
+    raw = io.BytesIO()
+    image.save(raw, format="PNG")
+    blob = raw.getvalue()
+
+    class _Part:
+        def related_part(self, rid):
+            assert rid == "rId1"
+            return type("_Image", (), {"blob": blob})()
+
+    return bg, _Part()
+
+
+def test_decor_baked_into_the_background_picture_is_protected():
+    """Логотип внутри фоновой картинки — тоже защищённая зона.
+
+    У ЛЦТ2026 четыре логотипа партнёров запечены в фоновый градиент: ни
+    одна проверка по фигурам их не видит, и заголовок ложился прямо на них.
+    Признак — перепад яркости внутри клетки, а не имя и не яркость: ровный
+    градиент даёт около нуля, нарисованное — резкий.
+    """
+    from PIL import Image, ImageDraw
+
+    from deckwright.parse.pictures import busy_regions
+
+    slide_w, slide_h = 12192000, 6858000
+    picture = Image.new("RGB", (1280, 720))
+    for y in range(720):
+        # Плавный градиент: сам по себе он не оформление и защиты не требует.
+        for x in range(1280):
+            picture.putpixel((x, y), (40 + x // 20, 5, 70 + y // 12))
+    draw = ImageDraw.Draw(picture)
+    draw.rectangle([1000, 30, 1180, 70], fill=(255, 255, 255))
+
+    zones = busy_regions(*_picture_background(picture), slide_w, slide_h)
+
+    assert zones, "нарисованное в фоне не найдено"
+    assert all(zone.bottom <= slide_h * 0.18 for zone in zones), "зоны не у верхнего края"
+    assert min(zone.x for zone in zones) >= slide_w * 0.7, "зоны левее рисунка"
+
+
+def test_a_background_photo_protects_nothing():
+    """Фотография во весь фон — не оформление по краю: места она не отнимает.
+
+    Иначе «занят» оказывается весь слайд и текст ставить некуда.
+    """
+    import random
+
+    from PIL import Image
+
+    from deckwright.parse.pictures import busy_regions
+
+    random.seed(4)
+    noisy = Image.new("RGB", (1280, 720))
+    noisy.putdata([
+        (random.randrange(256), random.randrange(256), random.randrange(256))
+        for _ in range(1280 * 720)
+    ])
+
+    assert busy_regions(*_picture_background(noisy), 12192000, 6858000) == []
+
+
+def test_a_smooth_gradient_background_protects_nothing():
+    """Ровный фон без рисунка защищать не от чего: текст не теряет места."""
+    from deckwright.parse.pictures import busy_regions
+
+    assert busy_regions(None, None, 12192000, 6858000) == []

@@ -108,7 +108,11 @@ def _title_in_body(slide, slide_h: int) -> bool:
 def _decor_boxes(slide, slide_w: int, slide_h: int) -> list[Box]:
     """Рамки декора слайда и его layout'а: всё, кроме плейсхолдеров и фона.
 
-    Фон — фигура крупнее трёх пятых слайда: по нему текст и должен лежать.
+    Крупные элементы здесь отсекаются по площади, и это намеренно грубо:
+    фигура во весь слайд чаще всего заливка, по которой текст и должен
+    лежать. Но площадь не отличает заливку от фотографии, поэтому крупные
+    элементы приходят отдельно — уже расклассифицированными
+    (`parse.surfaces`) — параметром `extra` у `bookend_pattern`.
     """
     boxes = []
     for tree in (slide.slide_layout.shapes._spTree, slide.shapes._spTree):
@@ -162,7 +166,18 @@ def _union(a: Box, b: Box) -> Box:
     return Box(x=x, y=y, w=max(a.right, b.right) - x, h=max(a.bottom, b.bottom) - y)
 
 
-def _grown(slots: list[Slot], slide_h: int, decor: list[Box] | None = None) -> list[Slot]:
+def _covers(outer: Box, inner: Box, share: float = 0.6) -> bool:
+    """Лежит ли рамка на этой поверхности большей частью своей площади."""
+    overlap = inner.intersection(outer)
+    return overlap is not None and overlap.area >= inner.area * share
+
+
+def _grown(
+    slots: list[Slot],
+    slide_h: int,
+    decor: list[Box] | None = None,
+    imagery: list[Box] | None = None,
+) -> list[Slot]:
     """Рамки текста под заголовком — с запасом вниз.
 
     Подзаголовок обложки рассчитан на одну строку шаблона («Разработчик
@@ -175,6 +190,13 @@ def _grown(slots: list[Slot], slide_h: int, decor: list[Box] | None = None) -> l
         # Заголовок и подпись спикера не растут: под заголовком стоит
         # подзаголовок, а подпись — это одна-две строки рядом с фото.
         if slot.role in (SlotRole.TITLE, SlotRole.SPEAKER):
+            grown.append(slot)
+            continue
+        # Рамка стоит на содержательной картинке. Донор держал её в одну
+        # строку именно поэтому: на фотографии читается короткая надпись, а
+        # выросшая рамка кладёт на картинку четыре строки мелким кеглем.
+        # Ровно это и происходило на обложке `vk_tech`.
+        if any(_covers(picture, slot.box) for picture in imagery or []):
             grown.append(slot)
             continue
         # Рост останавливается у первого места или декора под рамкой, а
@@ -236,6 +258,8 @@ def bookend_pattern(
     slide_w: int,
     slide_h: int,
     is_dark: bool,
+    obstacles: list[Box] | None = None,
+    pictures: list[Box] | None = None,
 ) -> Pattern | None:
     """Композиция служебного слайда: его плейсхолдеры и надписи — места под текст.
 
@@ -311,7 +335,15 @@ def bookend_pattern(
             slot = slot.model_copy(update={"role": SlotRole.SPEAKER})
             speakers.append((slot, avatar))
         marked.append(slot)
-    slots = _grown(marked, slide_h, _decor_boxes(slide, slide_w, slide_h))
+    # Оформление макета — наравне с декором слайда. Без него подзаголовок
+    # обложки `vk_tech` вырастал с 0.31 до 0.94 дюйма прямо на картинку:
+    # она крупнее порога площади и отсекалась как «фон».
+    slots = _grown(
+        marked,
+        slide_h,
+        _decor_boxes(slide, slide_w, slide_h) + list(obstacles or []),
+        imagery=list(pictures or []),
+    )
     if main.style is None:
         slots = [
             slot.model_copy(update={"style": default_style}) if slot.style is None else slot

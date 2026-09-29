@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from deckwright.layout.fitter import fit_paragraphs
 from deckwright.layout.matcher import _blocks_fit, _title_fits, _usable_slots
 from deckwright.layout.strategy import Strategy, ladder_for_role, role_typical
-from deckwright.layout.text_metrics import metrics_for_spec
+from deckwright.layout.text_metrics import Fonts
 from deckwright.schemas import (
     BlockKind,
     ContentBlock,
@@ -94,7 +94,8 @@ def achievable(
     `item_chars` — бюджет шаблона: он нужен абзацу и как нижняя граница,
     если читаемым кеглем не влезает ничего.
     """
-    metrics = metrics_for_spec(spec).metrics
+    fonts = Fonts(spec)
+    metrics = fonts if fonts.usable else None
     if metrics is None or not strategies:
         return {}
     ladders = {role: ladder_for_role(spec, role) for role in SlotRole}
@@ -182,7 +183,8 @@ def bookend_limits(spec: TemplateSpec) -> list[tuple[str, int, int]]:
     Мерятся первые места под текст в том порядке, в каком их заполняет
     вёрстка: заголовок и первое место под ним.
     """
-    metrics = metrics_for_spec(spec).metrics
+    fonts = Fonts(spec)
+    metrics = fonts if fonts.usable else None
     if metrics is None:
         return []
     by_id = {pattern.id: pattern for pattern in spec.patterns}
@@ -226,7 +228,11 @@ def bookend_limits(spec: TemplateSpec) -> list[tuple[str, int, int]]:
                     if floor <= size <= declared
                 }
             )
-            chars = _longest_at(metrics, slot.box, ladder, declared)
+            # Бюджет длины считается тем начертанием, которым место и
+            # будет набрано: полужирный заголовок шире обычного.
+            chars = _longest_at(
+                fonts.for_slot(slot), slot.box, ladder, declared
+            )
             if chars:
                 limits.append((f"{prefix}_{place}", 1, chars))
     return limits

@@ -95,13 +95,18 @@ def test_text_contrasts_with_its_background(result):
 
     Наивный вариант на тёмном шаблоне дал чёрное по чёрному: слайды
     конвертировались, проходили все структурные проверки и были нечитаемы.
+
+    Сравнивается то, что действительно лежит под текстом: у элемента может
+    быть своя подложка — тёмная панель донора, на которой шаблон и пишет
+    белым. Сверять такой текст с фоном слайда значит объявить находкой
+    замысел дизайнера.
     """
     for slide in result.deck.slides:
-        background = slide.background
-        if background is None:
-            continue
         for element in slide.all_elements():
             if element.text is None:
+                continue
+            background = element.backdrop or slide.background
+            if background is None:
                 continue
             for paragraph in element.text.paragraphs:
                 ratio = paragraph.style.color.contrast_ratio(background)

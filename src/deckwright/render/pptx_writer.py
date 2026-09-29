@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+import copy
+import warnings
 from pathlib import Path
 
 from lxml import etree
@@ -35,7 +37,12 @@ from pptx.util import Emu, Pt
 from deckwright.parse.geometry import iter_shapes
 from deckwright.parse.patterns import is_figure_text
 from deckwright.parse.tokens import own_background
-from deckwright.render.clone import clone_background, clone_shape, purge_slides
+from deckwright.render.clone import (
+    clone_background,
+    clone_shape,
+    ensure_unique_partnames,
+    purge_slides,
+)
 from deckwright.schemas import (
     Align,
     Box,
@@ -113,16 +120,84 @@ def _fill_text_frame(text_frame, element: Element, *, styled: bool) -> None:
         run.text = paragraph.text
         if styled:
             _apply_style(run, paragraph.style)
-            # Интервал — одинарный, явно. Иначе абзац наследует интервал
+            # Интервал — из стиля, явно. Иначе абзац наследует интервал
             # донора, подобранный под его текст: на `vk_tech` это 16 % под
             # цифру кеглем 166 pt, и наш текст кеглем 32 pt ложился строка на
-            # строку. Одинарный интервал — это 1.2 кегля, ровно то, чем
-            # фиттер мерит «влезает»: картинка обязана совпадать с моделью.
-            target.line_spacing = 1.0
+            # строку. Умолчание стиля — одинарный, то есть 1.2 кегля: ровно
+            # то, чем фиттер мерит «влезает», и то же число пишет HTML.
+            target.line_spacing = paragraph.style.line_spacing
+            if paragraph.style.space_before_pt:
+                target.space_before = Pt(paragraph.style.space_before_pt)
+            if paragraph.style.space_after_pt:
+                target.space_after = Pt(paragraph.style.space_after_pt)
+    _align_bullets(text_frame, element)
     _flatten_hanging_indent(text_frame)
 
 
 _A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+# Всё, чем абзац задаёт свой маркер. Меняется только целиком: оставить от
+# донора цвет маркера и взять с layout'а сам символ — получить третий вид.
+_BULLET_TAGS = frozenset(
+    {
+        "buNone", "buChar", "buAutoNum",
+        "buFont", "buFontTx",
+        "buSzPct", "buSzPts",
+        "buClr", "buClrTx",
+    }
+)
+
+# Дети `a:pPr` идут в заданном схемой порядке, и маркер стоит перед ними.
+_AFTER_BULLET = frozenset({"tabLst", "defRPr", "extLst"})
+
+
+def _set_bullet(paragraph, marks: list) -> None:
+    """Ставит абзацу ровно этот маркер, сняв всё, что было."""
+    ppr = paragraph._p.get_or_add_pPr()
+    for node in list(ppr):
+        if etree.QName(node).localname in _BULLET_TAGS:
+            ppr.remove(node)
+    anchor = next(
+        (node for node in ppr if etree.QName(node).localname in _AFTER_BULLET), None
+    )
+    for mark in marks:
+        clone = copy.deepcopy(mark)
+        if anchor is None:
+            ppr.append(clone)
+        else:
+            anchor.addprevious(clone)
+
+
+def _align_bullets(text_frame, element: Element) -> None:
+    """Маркеры абзацев — ровно те, о которых говорит представление.
+
+    Два правила, и оба про совпадение файла с расчётом.
+
+    Абзацы, которые дописываем мы, брали маркер с layout'а, а первый
+    оставался с донорским: список выходил с точкой у одного пункта и без
+    точек у остальных. Маркер списка берётся у первого абзаца — он пришёл
+    из шаблона.
+
+    А абзацу, который не список, маркер не ставится вовсе. Донорская
+    карточка приносила свой `buChar`, и одиночная подпись получала точку
+    вместе с её отступом — ширины на слово переставало хватать, и
+    LibreOffice ломал «Автоматическая» посреди слова. Фиттер про этот
+    отступ не знал: он вычитается только у списка.
+    """
+    wants = [p.bullet for p in element.text.paragraphs] if element.text else []
+    first = text_frame.paragraphs[0]._p.find(f"{_A}pPr")
+    marks = (
+        [node for node in first if etree.QName(node).localname in _BULLET_TAGS]
+        if first is not None
+        else []
+    )
+    none_mark = [text_frame.paragraphs[0]._p.makeelement(f"{_A}buNone", {})]
+    for index, paragraph in enumerate(text_frame.paragraphs):
+        wanted = wants[index] if index < len(wants) else bool(wants and wants[0])
+        if not wanted:
+            _set_bullet(paragraph, none_mark)
+        elif index and marks:
+            _set_bullet(paragraph, marks)
 
 
 def _flatten_hanging_indent(text_frame) -> None:
@@ -141,6 +216,35 @@ def _flatten_hanging_indent(text_frame) -> None:
         ppr = paragraph._p.get_or_add_pPr()
         ppr.set("marL", "0")
         ppr.set("indent", "0")
+
+
+def _anchor_text(text_frame, element: Element) -> None:
+    """Привязка по вертикали — из IR, во всех ветках записи одинаково.
+
+    Раньше её получала только новая надпись, а фигура донора и плейсхолдер
+    оставались со своей: одно и то же место писалось по-разному в
+    зависимости от того, нашлась ли целевая фигура.
+    """
+    if element.text is None or not element.text.paragraphs:
+        return
+    text_frame.vertical_anchor = _ANCHOR[element.text.paragraphs[0].style.valign]
+
+
+def _apply_insets(text_frame, box: Box) -> None:
+    """Поля рамки — те, которыми мерили. Не объявлены — остаются шаблонные.
+
+    Сумма по оси делится пополам: `Box` хранит её одним числом, потому что
+    фиттеру важна ширина, оставшаяся под текст, а не то, как она поделена
+    между левым и правым полем.
+    """
+    if box.inset_x is not None:
+        half = max(0, box.inset_x // 2)
+        text_frame.margin_left = Emu(half)
+        text_frame.margin_right = Emu(box.inset_x - half)
+    if box.inset_y is not None:
+        half = max(0, box.inset_y // 2)
+        text_frame.margin_top = Emu(half)
+        text_frame.margin_bottom = Emu(box.inset_y - half)
 
 
 def _placeholder_at(slide, box: Box):
@@ -167,22 +271,6 @@ def _placeholder_at(slide, box: Box):
     return None
 
 
-def _keep_fitted_size(text_frame, element: Element) -> None:
-    """Кегль плейсхолдера — шаблонный, если фиттеру не пришлось его уменьшать.
-
-    Уменьшил — значит, шаблонным кеглем текст не влезает, и кегль фиттера
-    записывается явно; всё остальное оформление остаётся шаблонным.
-    """
-    if element.text is None or not element.text.scale_steps_down:
-        return
-    size = Pt(element.text.paragraphs[0].style.size_pt)
-    for paragraph in text_frame.paragraphs:
-        # Интервал — тот, которым мерил фиттер, как и у прочего нашего текста.
-        paragraph.line_spacing = 1.0
-        for run in paragraph.runs:
-            run.font.size = size
-
-
 # Насколько рамка клона может разойтись с рамкой слота, чтобы всё ещё считаться
 # той же самой. Ноль не годится: обе стороны считаются в EMU через дробное
 # масштабирование групп, и округление расходится на единицы.
@@ -191,6 +279,17 @@ _BOX_TOLERANCE_EMU = 9_144  # 0.01 дюйма
 # Запас при отнесении фигуры к полосе повторителя: шаг умножается на номер
 # элемента, и округление копится от строки к строке.
 _BAND_TOLERANCE_EMU = 45_720  # 0.05 дюйма
+
+# Насколько фигура донора может стоять не там, где её посчитал шаг
+# повторителя, и всё ещё считаться той же самой. Размер при этом обязан
+# совпадать точно: сдвинутая рамка — та же рамка, рамка другого размера —
+# другое место.
+_BY_EYE_TOLERANCE_EMU = 45_720  # 0.05 дюйма
+
+# Номерам запас больше: они мелкие, стоят в кружках и сдвинуты сильнее
+# прочего (на `finansy` третий — на 0.029″ по горизонтали и 0.04″ по
+# вертикали). Зато их поиск ограничен ещё и полосой своего элемента.
+_ORDINAL_TOLERANCE_EMU = 91_440  # 0.1 дюйма
 
 
 def _same_box(a: Box, b: Box) -> bool:
@@ -252,7 +351,64 @@ def _take_matching_shape(candidates: list[tuple[Box, object]], box: Box):
             candidates.pop(index)
             shape.height = shape.height + (box.h - shape_box_.h)
             return shape
-    return None
+    # Фигура того же размера, поставленная на глаз. Шаг повторителя снят с
+    # подложек карточек, а надписи внутри дизайнер двигал отдельно: на
+    # `finansy` подписи второй и третьей карточки стоят на 0.03″ от своего
+    # расчётного места. Рамка не находилась, текст уезжал в новую надпись —
+    # без маркера списка и прочего оформления донора, — а пустая рамка
+    # донора оставалась на слайде.
+    return _take_shape_by_eye(candidates, box)
+
+
+def _take_shape_by_eye(
+    candidates: list[tuple[Box, object]],
+    box: Box,
+    band: Box | None = None,
+    tolerance: int = _BY_EYE_TOLERANCE_EMU,
+):
+    """Ближайшая фигура ровно того же размера, если она стоит почти там же.
+
+    Размер остаётся жёстким: рамка другого размера — другое место, а не
+    сдвинутое. `band` сужает поиск до полосы одного элемента повторителя.
+
+    Расстояние — наибольший из сдвигов по осям, а не их сумма: «сдвинута
+    на четыре сотых» — это про каждую ось отдельно, и складывать их значит
+    наказывать фигуру за то, что она сдвинута по обеим.
+    """
+    best: tuple[int, int, object] | None = None
+    for index, (shape_box_, shape) in enumerate(candidates):
+        if band is not None and not _inside(shape_box_, band):
+            continue
+        if (
+            abs(shape_box_.w - box.w) > _BOX_TOLERANCE_EMU
+            or abs(shape_box_.h - box.h) > _BOX_TOLERANCE_EMU
+        ):
+            continue
+        distance = max(abs(shape_box_.x - box.x), abs(shape_box_.y - box.y))
+        if distance > tolerance:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, index, shape)
+    if best is None:
+        return None
+    candidates.pop(best[1])
+    return best[2]
+
+
+def _take_ordinal_shape(candidates: list[tuple[Box, object]], box: Box, band: Box):
+    """Фигура номера элемента: тот же размер, своя полоса, ближайшая к месту.
+
+    Точного совпадения рамки здесь требовать нельзя. На `finansy` номера 2 и
+    3 не находились по рамке, и дальше их стирало как числа донора: на
+    слайде оставались пустые кружки и один-единственный номер «1».
+
+    Размер и полоса элемента остаются жёсткими: подпись карточки в 3″ шириной
+    номером не станет, а номер соседнего элемента лежит в соседней полосе.
+    """
+    exact = _take_matching_shape(candidates, box)
+    if exact is not None:
+        return exact
+    return _take_shape_by_eye(candidates, box, band, _ORDINAL_TOLERANCE_EMU)
 
 
 def _render_element(
@@ -294,18 +450,29 @@ def _render_element(
     # отступы, выравнивание и всё прочее оформление карточки.
     target = _take_matching_shape(candidates, element.box)
     if target is not None:
+        _anchor_text(target.text_frame, element)
         _fill_text_frame(target.text_frame, element, styled=True)
         return element.box
 
     placeholder = _placeholder_at(slide, element.box)
     if placeholder is not None:
-        _fill_text_frame(placeholder.text_frame, element, styled=False)
-        _keep_fitted_size(placeholder.text_frame, element)
+        # Плейсхолдер набирается тем же разрешённым стилем, что и всё
+        # остальное. Раньше здесь типографика не писалась вовсе — «оставим
+        # шаблонную», — и гарнитура молча доставалась теме: заголовок
+        # мерился `Calibri`, а рисовался `Calibri Light`. Теперь стиль
+        # шаблона уже разобран и лежит в IR, и записать его явно — значит
+        # нарисовать ровно то, что померено.
+        _anchor_text(placeholder.text_frame, element)
+        _fill_text_frame(placeholder.text_frame, element, styled=True)
         return element.box
 
     box = element.box
     textbox = slide.shapes.add_textbox(Emu(box.x), Emu(box.y), Emu(box.w), Emu(box.h))
     textbox.text_frame.word_wrap = True
+    # Поля рамки — те, по которым фиттер и мерил. Новая надпись получала
+    # умолчания PowerPoint (0.1″ по горизонтали), и в неё влезало меньше,
+    # чем обещал расчёт: рамка шаблона с нулевыми полями считалась шире.
+    _apply_insets(textbox.text_frame, box)
     # Привязка по вертикали — из IR: место, обрезанное по графике донора,
     # уже не совпадает с его рамкой и пишется новой надписью, а число у
     # донора прижато к низу рамки, над линией.
@@ -313,6 +480,31 @@ def _render_element(
         textbox.text_frame.vertical_anchor = _ANCHOR[element.text.paragraphs[0].style.valign]
     _fill_text_frame(textbox.text_frame, element, styled=True)
     return box
+
+
+def _grow_plates(slide, slide_ir) -> int:
+    """Растягивает подложки донора под наш текст.
+
+    Вёрстка решает, что плашка обязана вырасти (иначе текст лежит сразу на
+    двух фонах и не читается ни одним цветом), а рендер эту фигуру находит
+    и меняет ей размер. Ничего нового не рисуется: растёт собственная
+    фигура шаблона своего же цвета.
+    """
+    grown = 0
+    for element in slide_ir.all_elements():
+        plate = getattr(element, "plate", None)
+        if plate is None:
+            continue
+        for shape in slide.shapes:
+            if shape.width is None or shape.height is None:
+                continue
+            if not _same_box(_shape_box_of(shape), plate.donor):
+                continue
+            shape.left, shape.top = plate.box.x, plate.box.y
+            shape.width, shape.height = plate.box.w, plate.box.h
+            grown += 1
+            break
+    return grown
 
 
 def _shape_box_of(shape) -> Box:
@@ -358,8 +550,14 @@ def render_deck(
     spec: TemplateSpec,
     template_path: str | Path,
     output_path: str | Path,
+    notes: list[str] | None = None,
 ) -> Path:
-    """Собирает `.pptx` поверх шаблона и сохраняет его."""
+    """Собирает `.pptx` поверх шаблона и сохраняет его.
+
+    `notes` — куда дописать замечания о самой сборке (переименование частей).
+    Список принадлежит вызывающему: пайплайн кладёт эти строки в манифест
+    прогона, чтобы починенная аномалия не оставалась только в stderr.
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -411,6 +609,9 @@ def render_deck(
         donor_numbers = [
             (box, shape) for box, shape in candidates if is_figure_text(shape.text_frame.text)
         ]
+        # Подложки растут до того, как в них пишут: текст садится по своей
+        # рамке, а плашка под ним уже нужного размера.
+        _grow_plates(slide, slide_ir)
         filled: list[Box] = []
         for element in slide_ir.elements:
             used = _render_element(slide, element, candidates, accent, slide_ir)
@@ -444,6 +645,7 @@ def render_deck(
         _drop_donor_figures(slide, donor_numbers, filled)
         _drop_sibling_figures(slide, pattern, slide_ir)
         _drop_drawn_chart(slide, pattern, slide_ir)
+        _drop_replaced_donor_pictures(slide, slide_ir)
         # Панели обложки и финала вне ряда элементов — рамка «Название
         # проекта», плашка контактов — оформление: остаются и пустыми.
         # Пустые карточки ряда уходят, как на рабочем слайде.
@@ -464,6 +666,19 @@ def render_deck(
         _drop_orphan_links(slide, patterns.get(slide_ir.pattern_id), filled, deck, anchors)
         if slide_ir.speaker_notes:
             slide.notes_slide.notes_text_frame.text = slide_ir.speaker_notes
+
+    # Имена частей — до записи файла. Клонированный с донора график и наш
+    # нативный могли получить одно и то же `/ppt/charts/chart1.xml`: донорская
+    # часть в момент выбора имени осиротевшая, и `next_partname` её не видит.
+    # Подробности и воспроизведение — в `clone.ensure_unique_partnames`.
+    renamed = ensure_unique_partnames(prs)
+    for was, became in renamed:
+        # Молча переименовывать нельзя: это признак того, что граф частей
+        # разъехался, и след должен остаться в прогоне.
+        message = f"часть {was} переименована в {became}: имя занимала другая часть"
+        if notes is not None:
+            notes.append(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
 
     prs.save(str(output_path))
     return output_path
@@ -666,7 +881,7 @@ def _number_members(
             dx, dy = repeater.offset(index)
             for slot in ordinals:
                 box = slot.box.model_copy(update={"x": slot.box.x + dx, "y": slot.box.y + dy})
-                shape = _take_matching_shape(candidates, box)
+                shape = _take_ordinal_shape(candidates, box, band)
                 if shape is None:
                     continue
                 _write_number(shape, number, len((slot.placeholder_text or "").strip()))
@@ -1214,6 +1429,58 @@ def _drop_drawn_chart(slide, pattern, slide_ir) -> int:
             continue
         removed += _remove_shape_at(slide, box)
     return removed
+
+
+def _drop_replaced_donor_pictures(slide, slide_ir) -> int:
+    """Картинка донора под нашими данными — заменённый пример, а не оформление.
+
+    Слайд-образец `vk_education` несёт скриншот линейного графика во всю
+    ширину. `is_illustration` его не узнаёт: в плоском графике цветов меньше,
+    чем в 3D-рендере, — и он оставался под нашей диаграммой. На листе выходили
+    две диаграммы разом, и чужие числа с чужими датами стояли рядом с нашими,
+    чего правило «цифры только из входа» не допускает.
+
+    Распознавать саму картинку для этого не нужно: решает место. Если наш
+    график или таблица встали поверх неё, это было место под пример, и пример
+    заменён.
+    """
+    ours = [
+        element.box
+        for element in slide_ir.all_elements()
+        if element.kind in (ElementKind.CHART, ElementKind.TABLE)
+    ]
+    if not ours:
+        return 0
+    removed = 0
+    for element, box, _ in list(iter_shapes(slide.shapes._spTree)):
+        if box is None or not element.xpath(".//*[local-name()='blip']"):
+            continue
+        if etree.QName(element).localname == "grpSp":
+            continue
+        if not any(_covered_by(box, taken, _REPLACED_PICTURE_SHARE) for taken in ours):
+            continue
+        parent = element.getparent()
+        if parent is not None:
+            parent.remove(element)
+            removed += 1
+    return removed
+
+
+# Какую часть картинки донора обязан занять наш график или таблица, чтобы
+# считать её заменённым примером. Треть — потому что наш график занимает
+# место примера не целиком: рамка донора на `vk_education` выше нашей на
+# высоту заголовка и легенды. Меньшую долю брать нельзя: график в углу
+# полноэкранной подложки не делает подложку примером.
+_REPLACED_PICTURE_SHARE = 1 / 3
+
+
+def _covered_by(inner: Box, outer: Box, share: float = 0.6) -> bool:
+    """Лежит ли рамка в другой большей частью своей площади."""
+    width = min(inner.right, outer.right) - max(inner.x, outer.x)
+    height = min(inner.bottom, outer.bottom) - max(inner.y, outer.y)
+    if width <= 0 or height <= 0 or inner.w * inner.h <= 0:
+        return False
+    return width * height >= share * inner.w * inner.h
 
 
 def _overlaps_box(a: Box, b: Box) -> bool:

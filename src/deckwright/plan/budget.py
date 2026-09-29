@@ -80,10 +80,19 @@ class LengthBudget:
         переполнил 37 слайдов из 90. Ёмкость — кривая: чем меньше пунктов,
         тем длиннее каждый, и выбор между ними остаётся модели.
         """
-        lines = [
-            f"- заголовок слайда: не длиннее {self.title_chars} символов",
-            f"- подзаголовок: не длиннее {self.subtitle_chars} символов",
-        ]
+        if self.title_chars > 0:
+            lines = [
+                f"- заголовок слайда: не длиннее {self.title_chars} символов",
+                f"- подзаголовок: не длиннее {self.subtitle_chars} символов",
+            ]
+        else:
+            # Ноль — это «не измерено», а не «ноль символов». Названный
+            # числом, он уходит в промпт требованием, которое нельзя
+            # выполнить.
+            lines = [
+                "- длина заголовка и подзаголовка не измерена: пиши коротко, "
+                "одной мыслью",
+            ]
         listed = self.curve_for("bullets")
         steps = self.curve_for("steps")
         paragraph = self.curve_for("paragraph")
@@ -98,10 +107,16 @@ class LengthBudget:
         if paragraph:
             lines.append(f"- абзац (paragraph): не длиннее {paragraph[-1][1]} символов")
         if not listed:
-            lines.append(
-                f"- пункт списка: не длиннее {self.bullet_chars} символов "
-                f"и не длиннее {self.max_words_per_bullet} слов"
-            )
+            if self.bullet_chars > 0:
+                lines.append(
+                    f"- пункт списка: не длиннее {self.bullet_chars} символов "
+                    f"и не длиннее {self.max_words_per_bullet} слов"
+                )
+            else:
+                lines.append(
+                    "- длина пункта не измерена: не длиннее "
+                    f"{self.max_words_per_bullet} слов"
+                )
             lines.append(f"- пунктов на слайде: не больше {self.max_bullets}")
         else:
             lines.append(
@@ -258,6 +273,28 @@ def compute_budget(
     source = source or metrics_for_spec(spec)
     metrics, measured_with = source.metrics, source.description
     if metrics is None:
+        # Мерить нечем. Выдумывать длины нельзя, но и нули — не «неизвестно»:
+        # в промпт они уходили строкой «заголовок не длиннее 0 символов», и
+        # модель читала это как требование.
+        #
+        # Запасная мерка есть, и она не выдумка: длина текста, которым сам
+        # дизайнер заполнил слоты шаблона. Это измерение шаблона, а не
+        # расчёт по шрифту. Нет и его — длины остаются неизвестными, и
+        # промпт так и говорит.
+        shown_title = _demonstrated_length(spec, SlotRole.TITLE)
+        shown_body = _demonstrated_length(spec, SlotRole.BODY)
+        if shown_title or shown_body:
+            return LengthBudget(
+                title_chars=shown_title,
+                subtitle_chars=round(shown_title * 0.8),
+                bullet_chars=shown_body,
+                max_bullets=max_bullets,
+                max_words_per_bullet=max_words_per_bullet,
+                measured_with=(
+                    f"{measured_with}; длины сняты с текста самого шаблона"
+                ),
+                metric_compatible=False,
+            )
         return LengthBudget(
             0, 0, 0, max_bullets, max_words_per_bullet, measured_with, False
         )

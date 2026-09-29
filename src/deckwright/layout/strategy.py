@@ -129,6 +129,64 @@ def role_typical(spec: TemplateSpec, role: SlotRole) -> float:
 _BODY_LIKE = frozenset({SlotRole.BULLETS, SlotRole.CAPTION, SlotRole.QUOTE})
 
 
+# Высота слайда, для которой заданы минимальные кегли конфига: 7.5″ —
+# стандартный 16:9 в PowerPoint. Для слайда другой высоты те же пункты
+# занимают другую долю листа, поэтому предел пересчитывается.
+_REFERENCE_SLIDE_H_EMU = 6_858_000
+
+# {роль: минимальный читаемый кегль, pt}. Заполняется из `type.min_size_pt`
+# при загрузке конфига — тем же приёмом, что и предел параллельных
+# конвертаций, чтобы интерфейс, CLI и тесты жили по одним числам.
+_MIN_SIZE_PT: dict[SlotRole, float] = {}
+
+
+def configure_min_sizes(sizes: dict[str, float]) -> None:
+    """Задаёт нижние границы читаемости по ролям. Пустой словарь — снять."""
+    _MIN_SIZE_PT.clear()
+    for name, size in (sizes or {}).items():
+        _MIN_SIZE_PT[SlotRole(name)] = float(size)
+
+
+def readable_floor(spec: TemplateSpec, role: SlotRole) -> float:
+    """Нижняя граница читаемости для роли — с оглядкой на сам шаблон.
+
+    Это **требование к результату, а не запрет фиттеру**. Проба показала,
+    почему: с жёсткой границей `vk_tech` переставал брать композицию из
+    двух карточек — текст в неё крупным кеглем не влезал, — и уходил в
+    композицию со схемой, где надпись ложилась поверх круговой графики и
+    выезжала за нижний край. Читаемый кегль ценой развалившегося слайда не
+    выигрыш. Поэтому граница проверяется аудитом
+    (`template.text_too_small`), а вёрстка по-прежнему живёт по шкале
+    шаблона.
+
+    Требовать от шаблона кегля, которым он никогда не набирает такие места,
+    значит верстать не его: у плотного справочника тело текста бывает 12 pt
+    по замыслу. Поэтому берётся меньшее из числа конфига и самого крупного
+    кегля, которым шаблон эту роль набирает, — предел поднимается ровно
+    настолько, насколько шаблон это позволяет.
+    """
+    wanted = _MIN_SIZE_PT.get(role)
+    declared = _declared_sizes(spec, role)
+    if not declared and role in _BODY_LIKE:
+        # Роль без своих слотов живёт по телу текста — и по его границе
+        # читаемости тоже: иначе пункты повестки, севшие в место подписи,
+        # разрешалось бы набрать мельче, чем сам текст.
+        declared = _declared_sizes(spec, SlotRole.BODY)
+        wanted = _MIN_SIZE_PT.get(SlotRole.BODY, wanted)
+    if not wanted or not declared:
+        return 0.0
+    height = getattr(spec, "slide_height_emu", 0) or _REFERENCE_SLIDE_H_EMU
+    wanted *= height / _REFERENCE_SLIDE_H_EMU
+    # Мерка шаблона — типичный кегль роли, а не самый крупный: у `vk_tech`
+    # заголовки объявлены от 18 до 54 pt, и равняться на 54 значит требовать
+    # от подписи кегля, которым шаблон набирает обложку. Требование выше
+    # типичного ломает собственную вёрстку шаблона: на пробе оно обрезало
+    # текст на пятнадцати элементах из тридцати.
+    ordered = sorted(declared)
+    typical = ordered[len(ordered) // 2]
+    return min(wanted, typical)
+
+
 def role_floor(spec: TemplateSpec, role: SlotRole) -> float:
     """Ниже какого кегля фиттеру нельзя опускаться для этой роли.
 
@@ -141,11 +199,40 @@ def role_floor(spec: TemplateSpec, role: SlotRole) -> float:
     12.25 pt, и это и есть его собственный ответ на вопрос «насколько мелко
     здесь можно».
 
-    Роль, которой в шаблоне нет вовсе, предела не получает: выдумывать за
-    шаблон число неоткуда.
+    Роли, у которой своих слотов в шаблоне нет, предел достаётся от тела
+    текста — как и типичный кегль. Без этого роль без слотов получала предел
+    0, и шкала открывалась целиком: у `vk_tech` подпись разрешалось ставить
+    ступенью 4.14 pt, которую шкала набрала из декора.
     """
     sizes = _declared_sizes(spec, role)
+    if not sizes and role in _BODY_LIKE:
+        sizes = _declared_sizes(spec, SlotRole.BODY)
     return min(sizes) if sizes else 0.0
+
+
+# Насколько мельче собственного кегля композиции разрешено набирать слот.
+# Три пятых — та же мерка, по которой выбирается композиция («не мельче 3/5
+# типичного»): ниже неё место перестаёт читаться как то, чем оно задумано.
+SLOT_FLOOR_SHARE = 0.6
+
+
+def slot_floor(spec: TemplateSpec, role: SlotRole, declared: float) -> float:
+    """Ниже какого кегля нельзя опускать текст конкретного слота.
+
+    `role_floor` отвечает за роль целиком и потому берёт минимум по всему
+    шаблону. У `vk_tech` заголовки объявлены от 18 до 54 pt, и заголовок в
+    54 pt разрешалось ужать втрое — до микроподписи в 18 pt, формально не
+    выходя за предел роли. Иерархия у каждой композиции своя: мелкий
+    колонтитул не задаёт минимум заголовку, и предел считается от кегля
+    самого слота.
+
+    Предел роли остаётся нижней границей: спускаться ниже того, чем шаблон
+    вообще набирает такие слоты, не за чем и по собственному кеглю слота.
+    """
+    floor = role_floor(spec, role)
+    if declared > 0:
+        floor = max(floor, SLOT_FLOOR_SHARE * declared)
+    return floor
 
 
 def ladder_for_role(spec: TemplateSpec, role: SlotRole) -> list[float]:
@@ -153,6 +240,17 @@ def ladder_for_role(spec: TemplateSpec, role: SlotRole) -> list[float]:
     floor = role_floor(spec, role)
     ladder = [size for size in scale_ladder(spec) if size >= floor]
     return ladder or scale_ladder(spec)
+
+
+def ladder_for_slot(spec: TemplateSpec, role: SlotRole, declared: float) -> list[float]:
+    """Ступени, доступные фиттеру для конкретного слота.
+
+    Верх шкалы остаётся общим: крупнее объявленного текст ставить можно —
+    это решает стратегия варианта. Режется низ.
+    """
+    floor = slot_floor(spec, role, declared)
+    ladder = [size for size in scale_ladder(spec) if size >= floor]
+    return ladder or ladder_for_role(spec, role)
 
 
 @dataclass(frozen=True)

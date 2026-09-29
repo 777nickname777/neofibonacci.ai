@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -99,14 +99,31 @@ def ingest(
     if client is None:
         raise IngestError("для разбора входа нужна модель, а клиент не задан")
 
-    documents, warnings = render_documents(sources, max_chars)
     prompt = load_prompt(agent_prompt("ingest_content"), prompts_dir)
     purpose = request.purpose.value if request.purpose else "не выбрано"
-    answer = client.complete(
-        step=prompt.step,
-        prompt=prompt.render(purpose=purpose, documents=documents, max_facts=MAX_FACTS),
-        schema=IngestAnswer,
-    )
+    chunks, warnings = split_sources(sources, max_chars)
+    # У каждой части просим столько фактов, чтобы после слияния набралось
+    # нужное число и осталось чем заменить повторы.
+    per_chunk = MAX_FACTS if len(chunks) == 1 else max(4, -(-MAX_FACTS // len(chunks)) + 2)
+    answers = []
+    for chunk in chunks:
+        documents, cut = render_documents(chunk, max_chars)
+        warnings.extend(cut)
+        answers.append(
+            client.complete(
+                step=prompt.step,
+                prompt=prompt.render(
+                    purpose=purpose, documents=documents, max_facts=per_chunk
+                ),
+                schema=IngestAnswer,
+            )
+        )
+    if len(chunks) > 1:
+        warnings.append(
+            f"вход прочитан по частям: запросов к модели {len(chunks)}, "
+            "границы частей — между фрагментами документов"
+        )
+    answer = merge_answers(answers, MAX_FACTS)
     pack, dropped, grounding_warnings = to_pack(answer, sources, request, default_purpose)
     return IngestResult(
         pack=pack,
@@ -141,6 +158,156 @@ def _ready_pack(request: IngestInput) -> ContentPack | None:
     if updates:
         pack = pack.model_copy(update={"brief": pack.brief.model_copy(update=updates)})
     return pack
+
+
+def _header(source: SourceText) -> str:
+    return f"[{source.doc_id}] {source.name} ({source.kind})"
+
+
+def _fragment_text(fragment) -> str:
+    where = f"({fragment.locator}) " if fragment.locator else ""
+    return f"{where}{fragment.text}"
+
+
+def _table_text(table) -> str:
+    where = f"({table.locator}) " if table.locator else ""
+    return where + "Таблица:\n" + "\n".join(" | ".join(row) for row in table.rows)
+
+
+def _slice(source: SourceText, fragments: list[int], tables: list[int]) -> SourceText:
+    """Тот же документ, но только с этими фрагментами и таблицами."""
+    return replace(
+        source,
+        fragments=[source.fragments[i] for i in fragments],
+        tables=[source.tables[i] for i in tables],
+    )
+
+
+def split_sources(
+    sources: list[SourceText], max_chars: int
+) -> tuple[list[list[SourceText]], list[str]]:
+    """Вход, разбитый на части, каждая из которых влезает в бюджет запроса.
+
+    Режется по смысловым границам — между фрагментами и таблицами, которые
+    уже выделил разбор файла, — и никогда посреди фрагмента. Прежний срез
+    оставлял начало и выбрасывал остальное молча: середина и конец длинного
+    отчёта до модели не доходили вовсе, а предупреждение об этом читал не
+    тот, кто принимал решение по колоде.
+
+    Документ, не влезающий целиком, продолжается в следующей части под тем же
+    `doc_id`: ссылки на источник от этого не портятся.
+    """
+    warnings: list[str] = []
+    chunks: list[list[SourceText]] = []
+    current: list[SourceText] = []
+    used = 0
+    # Бриф — не материал, который делится, а указание: что показываем и кому.
+    # Он повторяется в каждой части, иначе вторая половина отчёта разбиралась
+    # бы без темы и без назначения колоды.
+    brief = [source for source in sources if source.kind == "inline"]
+    sources = [source for source in sources if source.kind != "inline"]
+    if brief and not sources:
+        return [brief], warnings
+    used = sum(len(_header(item)) + len(_fragment_text(f)) + 1
+               for item in brief for f in item.fragments)
+
+    reserved = used
+
+    def flush() -> None:
+        nonlocal current, used
+        if current:
+            chunks.append(brief + current)
+        current, used = [], reserved
+
+    for source in sources:
+        head = len(_header(source)) + 1
+        entries = [
+            ("f", index, len(_fragment_text(item)) + 1)
+            for index, item in enumerate(source.fragments)
+        ]
+        entries += [
+            ("t", index, len(_table_text(item)) + 1)
+            for index, item in enumerate(source.tables)
+        ]
+        fragments: list[int] = []
+        tables: list[int] = []
+        started = False
+        for kind, index, size in entries:
+            if head + size > max_chars:
+                # Один фрагмент длиннее целого бюджета: единственное место,
+                # где граница окажется не смысловой. Обрезку сделает
+                # `render_documents`, и она о ней скажет.
+                warnings.append(
+                    f"{source.name}: фрагмент в {size} символов длиннее бюджета "
+                    f"запроса ({max_chars}) и будет обрезан внутри"
+                )
+            cost = size + (0 if started else head)
+            if used + cost > max_chars and (fragments or tables or current):
+                if fragments or tables:
+                    current.append(_slice(source, fragments, tables))
+                    fragments, tables = [], []
+                flush()
+                started = False
+                cost = size + head
+            (fragments if kind == "f" else tables).append(index)
+            used += cost
+            started = True
+        if fragments or tables:
+            current.append(_slice(source, fragments, tables))
+    flush()
+    return chunks or [brief + sources], warnings
+
+
+def merge_answers(answers: list[IngestAnswer], max_facts: int) -> IngestAnswer:
+    """Ответы по частям входа — в один, без потери середины.
+
+    Факты, ряды и цитаты берутся по кругу: первый из каждой части, потом
+    второй из каждой и так далее. Срезав объединённый список подряд, мы
+    вернули бы ровно ту беду, ради которой вход и делится: всё с начала,
+    ничего из конца.
+    """
+    if len(answers) == 1:
+        return answers[0]
+    first = answers[0]
+    return first.model_copy(
+        update={
+            "facts": _round_robin([a.facts for a in answers], max_facts, _text_key),
+            "series": _round_robin([a.series for a in answers], max_facts, _name_key),
+            "quotes": _round_robin([a.quotes for a in answers], max_facts, _text_key),
+            "topic": next((a.topic for a in answers if a.topic.strip()), first.topic),
+            "goal": next((a.goal for a in answers if a.goal.strip()), first.goal),
+            "audience": next(
+                (a.audience for a in answers if a.audience.strip()), first.audience
+            ),
+        }
+    )
+
+
+def _text_key(item) -> str:
+    return normalize(getattr(item, "text", ""))[:80]
+
+
+def _name_key(item) -> str:
+    return normalize(getattr(item, "name", ""))[:80]
+
+
+def _round_robin(groups: list[list], limit: int, key) -> list:
+    """По одному из каждой части по кругу, без повторов, до предела."""
+    taken: list = []
+    seen: set[str] = set()
+    for index in range(max((len(group) for group in groups), default=0)):
+        for group in groups:
+            if index >= len(group):
+                continue
+            item = group[index]
+            mark = key(item)
+            if mark and mark in seen:
+                continue
+            seen.add(mark)
+            taken.append(item)
+            if len(taken) >= limit:
+                return taken
+    return taken
 
 
 def render_documents(sources: list[SourceText], max_chars: int) -> tuple[str, list[str]]:

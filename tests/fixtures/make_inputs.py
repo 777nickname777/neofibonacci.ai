@@ -198,8 +198,21 @@ def _docx_report(path: Path) -> None:
     document.save(str(path))
 
 
-FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-FONT_BOLD = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+# LOCAL-COMPAT (диагностика на macOS, вне бизнес-логики): исходно путь был
+# зашит под Debian; на macOS DejaVu ставится в ~/Library/Fonts.
+def _dejavu(name: str) -> Path:
+    roots = ("/usr/share/fonts", "/usr/local/share/fonts",
+             str(Path.home() / "Library" / "Fonts"), "/Library/Fonts",
+             "/System/Library/Fonts")
+    for root in roots:
+        hit = next(Path(root).rglob(name), None) if Path(root).is_dir() else None
+        if hit is not None:
+            return hit
+    return Path("/usr/share/fonts/truetype/dejavu") / name
+
+
+FONT = _dejavu("DejaVuSans.ttf")
+FONT_BOLD = _dejavu("DejaVuSans-Bold.ttf")
 
 
 def _pdf_report(path: Path) -> None:

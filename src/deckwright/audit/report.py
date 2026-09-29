@@ -12,7 +12,7 @@ from pathlib import Path
 
 from deckwright.audit.contextual import runner as contextual
 from deckwright.audit.deterministic import content as content_checks
-from deckwright.audit.deterministic import geometry, template_fidelity
+from deckwright.audit.deterministic import geometry, limits, template_fidelity
 from deckwright.audit.registry import CHECKS, contextual_ids
 from deckwright.schemas import AuditReport, DeckIR, DeckPlan, Severity, TemplateSpec
 
@@ -37,6 +37,9 @@ def audit_deck(
     """
     issues = []
     issues.extend(geometry.run(deck, spec))
+    issues.extend(
+        limits.run(deck, cfg.audit.min_fill_ratio, cfg.audit.max_fill_ratio)
+    )
     issues.extend(template_fidelity.run(deck, spec, cfg.audit.contrast_min_ratio))
     issues.extend(
         content_checks.run(
@@ -68,7 +71,10 @@ def audit_deck(
     issues.sort(key=lambda issue: (order[issue.severity], issue.slide_index, issue.check_id))
 
     return AuditReport(
-        variant=deck.variant, issues=_without_repeats(issues), skipped_checks=skipped
+        variant=deck.variant,
+        issues=_without_repeats(issues),
+        skipped_checks=skipped,
+        checks_total=len(CHECKS),
     )
 
 

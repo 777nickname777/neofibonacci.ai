@@ -315,18 +315,21 @@ def test_moved_logo_is_caught(clean):
 
 
 def test_empty_slide_is_caught(clean, tmp_path):
-    """Слайд без содержания: считается по собранному файлу, а не по IR."""
-    from pptx import Presentation
+    """Слайд без содержания.
 
-    presentation = Presentation(str(clean.pptx))
-    for slide in presentation.slides:
-        for shape in list(slide.shapes):
-            shape._element.getparent().remove(shape._element)
-    bare = tmp_path / "bare.pptx"
-    presentation.save(str(bare))
+    Считается по объединению рамок **содержания**, а не по сумме площадей
+    всех фигур собранного файла: логотип, линия и картинка донора набирали
+    заполненность, и слайд из одного заголовка проходил порог. Приложение 1
+    говорит про заполнение слайда содержанием, а не про площадь оформления.
+    """
+    from deckwright.audit.deterministic import limits
 
-    found = content_checks.fill_ratio(bare, clean.deck)
+    deck = clean.deck.model_copy(deep=True)
+    for slide in deck.slides:
+        slide.elements = []
+    found = limits.slide_too_empty(deck, min_fill=0.25)
     assert found and found[0].check_id == "density.slide_too_empty"
+    assert len(found) == len(deck.slides), "пустыми названы не все слайды"
 
 
 def test_broken_package_is_caught(clean, tmp_path, template_paths):
@@ -431,6 +434,111 @@ def test_cited_figure_that_is_not_in_sources_is_caught(clean, pack):
     ]
     found = content_checks.figures(plan, pack)
     assert any(i.check_id == "content.figure_not_in_sources" for i in found)
+
+
+def _sales_pack(pack):
+    """Пакет ровно того вида, что дал живой прогон `finansy`.
+
+    Факт-тема с квартальной выручкой и ряд помесячной выручки: числа ряда
+    в факте не встречаются, поэтому ссылка на факт — именно перепутанная,
+    а не спорная.
+    """
+    from deckwright.schemas import Fact, NumericPoint, Series
+
+    return pack.model_copy(
+        update={
+            "facts": [
+                Fact(
+                    id="f1",
+                    text="Выручка за III квартал 2026 года составила 47,3 млн руб.",
+                    source_doc_id=pack.facts[0].source_doc_id,
+                    value=47.3,
+                    unit="млн руб.",
+                )
+            ],
+            "series": [
+                Series(
+                    id="s1",
+                    name="Выручка по месяцам",
+                    unit="млн руб.",
+                    points=[
+                        NumericPoint(label="Июль", value=14.2),
+                        NumericPoint(label="Август", value=15.1),
+                        NumericPoint(label="Сентябрь", value=18.0),
+                    ],
+                    source_doc_id=pack.facts[0].source_doc_id,
+                )
+            ],
+            "quotes": [],
+        }
+    )
+
+
+def test_figure_from_the_right_input_but_the_wrong_citation(clean, pack):
+    """Число из входа с перепутанной ссылкой — не выдумка, и не ошибка.
+
+    Живой прогон (`finansy`, run 34): модель сослала числа таблиц на
+    факт-тему «выручка 47,3 млн», и колода с верными числами получила
+    десять `error` «число не из источников» из двадцати одной находки.
+    Такая находка учит не верить правильной колоде, поэтому она отделена:
+    перепутанная ссылка — предупреждение, и в нём сказано, где число
+    на самом деле лежит.
+    """
+    from deckwright.schemas import Figure, FigureKind
+
+    sales = _sales_pack(pack)
+    plan = clean.plan.model_copy(deep=True)
+    # Пакет сведён к двум источникам: числа остальных слайдов ссылались бы
+    # на факты, которых в нём уже нет, и мешали бы читать результат.
+    for other in plan.slides:
+        other.figures = []
+    plan.slides[0].figures = [
+        Figure(text="14,2", kind=FigureKind.CITED, fact_ids=["f1"])
+    ]
+    found = content_checks.figures(plan, sales)
+    ids = {i.check_id for i in found}
+    assert "content.figure_cites_wrong_fact" in ids
+    assert "content.figure_not_in_sources" not in ids, (
+        "верное число из входа названо выдумкой"
+    )
+    told = next(i for i in found if i.check_id == "content.figure_cites_wrong_fact")
+    assert "s1" in told.message, "не сказано, где число лежит на самом деле"
+    assert told.severity is not Severity.ERROR
+
+
+def test_a_number_nowhere_in_the_input_stays_an_error(clean, pack):
+    """Разделение проверок не ослабило её: выдумка по-прежнему ошибка."""
+    from deckwright.schemas import Figure, FigureKind
+
+    sales = _sales_pack(pack)
+    plan = clean.plan.model_copy(deep=True)
+    # Пакет сведён к двум источникам: числа остальных слайдов ссылались бы
+    # на факты, которых в нём уже нет, и мешали бы читать результат.
+    for other in plan.slides:
+        other.figures = []
+    plan.slides[0].figures = [
+        Figure(text="987654321", kind=FigureKind.CITED, fact_ids=["f1"])
+    ]
+    found = content_checks.figures(plan, sales)
+    ids = {i.check_id for i in found}
+    assert "content.figure_not_in_sources" in ids
+    assert "content.figure_cites_wrong_fact" not in ids
+
+
+def test_a_correct_citation_stays_silent(clean, pack):
+    """Число, сошедшееся со своим же источником, не даёт находок вовсе."""
+    from deckwright.schemas import Figure, FigureKind
+
+    sales = _sales_pack(pack)
+    plan = clean.plan.model_copy(deep=True)
+    # Пакет сведён к двум источникам: числа остальных слайдов ссылались бы
+    # на факты, которых в нём уже нет, и мешали бы читать результат.
+    for other in plan.slides:
+        other.figures = []
+    plan.slides[0].figures = [
+        Figure(text="14,2", kind=FigureKind.CITED, fact_ids=["s1"])
+    ]
+    assert content_checks.figures(plan, sales) == []
 
 
 def test_unknown_layout_is_caught(clean):
@@ -634,8 +742,14 @@ def test_every_deterministic_check_has_both_tests():
 
     Позитив общий — «чистая колода без ошибок»; негатив обязан быть свой у
     каждой. Проверка, которая всегда молчит, позитивный тест проходит идеально.
+
+    Ищется по всем файлам тестов, а не по этому одному: пределы Приложения 1
+    живут в `test_audit_limits.py`, и требование «у каждой проверки есть
+    негатив» не про то, в каком файле он лежит.
     """
-    source = Path(__file__).read_text("utf-8")
+    source = "\n".join(
+        path.read_text("utf-8") for path in sorted(Path(__file__).parent.glob("test_*.py"))
+    )
     missing = [
         check_id
         for check_id in deterministic_ids()
@@ -1129,11 +1243,17 @@ def test_identical_pages_of_parallel_variants_are_asked_once(
 def test_table_header_is_written_as_the_template_writes_on_its_fill(
     pack, recorded_dir, tmp_path
 ):
-    """Шапка таблицы `vk_workspace` — белым по синему, как пишет шаблон.
+    """Шапка таблицы пишется тем же цветом, что и весь текст слайда.
 
-    Контраст проходил и у чёрного, но это нарушение стиля. Раньше образцом
-    «как шаблон пишет на синем» служила картинка на синей плашке: её цвет
-    текста — умолчание стиля, чёрный.
+    Раньше здесь проверялось обратное: шапка набиралась белым по синему,
+    «как пишет шаблон». Требование к результату сильнее: весь текст слайда,
+    кроме заголовка, — одного цвета, и шапка столбцов заголовком слайда не
+    является. Если общий цвет на заливке шапки не читается, меняется
+    заливка, а не цвет текста (`matcher._fit_header_fill`), — акцент
+    остаётся линейкой и подсветкой строк.
+
+    Сам стиль шаблона при этом не теряется: цвет выбирается из его палитры
+    и обязан пройти порог контраста на всех подложках слайда.
     """
     from deckwright.audit.deterministic.template_fidelity import text_on_fill
     from deckwright.pipeline import run_variant
@@ -1153,8 +1273,20 @@ def test_table_header_is_written_as_the_template_writes_on_its_fill(
     ]
     assert tables, "в колоде нет таблицы"
     slide, element = tables[0]
-    fill = element.table.header_fill
-    assert element.table.header_style.color.rgb == "FFFFFF", fill.rgb
+    body = [
+        paragraph.style.color.rgb
+        for other in slide.all_elements()
+        if other.role is not SlotRole.TITLE and other.text is not None
+        for paragraph in other.text.paragraphs
+    ]
+    assert element.table.header_style.color.rgb == element.table.cell_style.color.rgb, (
+        "шапка и ячейки одной таблицы написаны разным цветом"
+    )
+    if body:
+        assert element.table.header_style.color.rgb in set(body), (
+            "шапка таблицы выбивается из цвета текста слайда"
+        )
+    # Читаемость при этом не потеряна: цвет проходит порог на своей заливке.
     assert not text_on_fill(slide, result.spec)
 
     # Та же шапка чёрным — находка.

@@ -116,6 +116,158 @@ def is_illustration(blob: bytes, box: Box, slide_w: int, slide_h: int) -> bool:
     return len({pixel[:3] for pixel in pixels if pixel[3] >= 250}) >= MIN_ILLUSTRATION_COLORS
 
 
+# На сколько клеток делится картинка-фон, когда по ней меряют контраст.
+# Восемь на пять — это клетка примерно в полтора дюйма: мельче не нужно
+# (текстовый блок редко бывает уже), крупнее — теряются тёмные углы.
+BACKGROUND_COLS = 8
+BACKGROUND_ROWS = 5
+
+
+def background_grid(
+    bg: etree._Element | None, part, slide_w: int, slide_h: int
+) -> list[tuple[Box, str]]:
+    """Фон-картинка клетками: область и её средний цвет.
+
+    Фон бывает не заливкой, а изображением: у шаблона ЛЦТ2026 это
+    фиолетовый градиент во весь слайд (`p:bg` с `a:blipFill`). Разбор его
+    не читал, фон считался светлым, и по тёмно-фиолетовому писалось
+    чёрным — 1.2:1 на отрисованной странице, семнадцать надписей на колоду.
+
+    Клетками, а не одним средним цветом: у картинки светлый угол и тёмный
+    угол — разные фоны, и текст в них требует разного цвета. Средний цвет
+    клетки честен ровно настолько, насколько плавна картинка; резкую
+    границу внутри клетки он сгладит, и это предел метода.
+    """
+    if bg is None:
+        return []
+    blip = bg.find(f".//{{{A_NS}}}blip")
+    if blip is None:
+        return []
+    rid = blip.get(f"{{{R_NS}}}embed")
+    if not rid:
+        return []
+    try:
+        blob = part.related_part(rid).blob
+    except (KeyError, AttributeError):
+        return []
+    try:
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(blob))
+        image.draft("RGB", (256, 256))
+        small = image.convert("RGB").resize(
+            (BACKGROUND_COLS, BACKGROUND_ROWS), Image.Resampling.BOX
+        )
+    except Exception:
+        # Вектор (EMF/SVG) или битый файл: фон остаётся неизвестным, и
+        # это честнее выдуманного цвета.
+        return []
+    cell_w = slide_w // BACKGROUND_COLS
+    cell_h = slide_h // BACKGROUND_ROWS
+    cells: list[tuple[Box, str]] = []
+    for row in range(BACKGROUND_ROWS):
+        for col in range(BACKGROUND_COLS):
+            red, green, blue = small.getpixel((col, row))
+            cells.append(
+                (
+                    Box(x=col * cell_w, y=row * cell_h, w=cell_w, h=cell_h),
+                    f"{red:02X}{green:02X}{blue:02X}",
+                )
+            )
+    return cells
+
+
+# Мелкая сетка, по которой ищется графика внутри фона-картинки, и сколько
+# сама клетка делится при замере. Клетка выходит около четверти дюйма.
+BUSY_COLS = 32
+BUSY_ROWS = 18
+BUSY_SUB = 4
+# Перепад яркости внутри клетки, выше которого там что-то нарисовано, а не
+# ровный фон или его плавный градиент. Восемь сотых — по замеру на фоне
+# ЛЦТ2026: у клеток с логотипами перепад 0.08–0.4, у всех остальных 1188
+# клеток фиолетового градиента — ниже 0.08.
+BUSY_SPREAD = 0.08
+# Занято больше этой доли слайда — это фотография во весь фон, а не декор
+# по краю: защищать там нечего, иначе текст останется без места.
+BUSY_LIMIT = 0.25
+# Полоса у верхнего и нижнего края, в которой запечённая графика считается
+# оформлением. Логотипы, плашки и колонтитулы живут там; рисунок в середине
+# фона — это фон, и его закрывают карточки и текст по общим правилам.
+BUSY_EDGE_SHARE = 0.18
+
+
+def _relative_luminance(pixel: tuple[int, int, int]) -> float:
+    def channel(value: int) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = pixel
+    return (
+        0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+    )
+
+
+def busy_regions(
+    bg: etree._Element | None, part, slide_w: int, slide_h: int
+) -> list[Box]:
+    """Где на фоне-картинке что-то нарисовано: логотипы, полосы, значки.
+
+    Бывает, что логотипы не фигуры и не картинки на слайде, а запечены в
+    саму фоновую картинку: у шаблона ЛЦТ2026 четыре логотипа партнёров
+    сидят в правом верхнем углу фиолетового градиента. Ни одна проверка по
+    фигурам их не видит, и заголовок ложился прямо на них.
+
+    Признак — не яркость и не имя, а перепад яркости внутри клетки: ровный
+    фон и его градиент дают перепад около нуля, нарисованное — резкий. Если
+    «занят» весь слайд, это фотография во весь фон, а не оформление: тогда
+    защищать нечего.
+    """
+    if bg is None:
+        return []
+    blip = bg.find(f".//{{{A_NS}}}blip")
+    if blip is None:
+        return []
+    rid = blip.get(f"{{{R_NS}}}embed")
+    if not rid:
+        return []
+    try:
+        blob = part.related_part(rid).blob
+    except (KeyError, AttributeError):
+        return []
+    try:
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(blob))
+        small = image.convert("RGB").resize(
+            (BUSY_COLS * BUSY_SUB, BUSY_ROWS * BUSY_SUB), Image.Resampling.BOX
+        )
+    except Exception:
+        return []
+    cell_w = slide_w // BUSY_COLS
+    cell_h = slide_h // BUSY_ROWS
+    busy: list[Box] = []
+    for row in range(BUSY_ROWS):
+        for col in range(BUSY_COLS):
+            levels = [
+                _relative_luminance(
+                    small.getpixel((col * BUSY_SUB + dx, row * BUSY_SUB + dy))
+                )
+                for dx in range(BUSY_SUB)
+                for dy in range(BUSY_SUB)
+            ]
+            if max(levels) - min(levels) <= BUSY_SPREAD:
+                continue
+            busy.append(Box(x=col * cell_w, y=row * cell_h, w=cell_w, h=cell_h))
+    if len(busy) > BUSY_LIMIT * BUSY_COLS * BUSY_ROWS:
+        return []
+    band = slide_h * BUSY_EDGE_SHARE
+    return [
+        cell
+        for cell in busy
+        if cell.bottom <= band or cell.y >= slide_h - band
+    ]
+
+
 def photo_boxes(
     tree: etree._Element, part, slide_w: int, slide_h: int, illustrations: bool = False
 ) -> list[Box]:

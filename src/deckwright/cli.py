@@ -25,7 +25,14 @@ DEFAULT_CONFIG = Path("configs/config.yaml")
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Готовность окружения: что сломано насмерть, а что просто недоступно.
+
+    Разница не косметическая. Без LibreOffice прогон всё равно соберёт
+    `.pptx` и `.html`, и объявлять такое окружение негодным — значит
+    отговаривать человека от работы, которая работает.
+    """
     soffice = "soffice"
+    cfg = None
     if args.config and Path(args.config).exists():
         try:
             cfg = load_config(args.config)
@@ -35,15 +42,27 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         soffice = cfg.render.soffice_binary
         print(f"✓ конфигурация {args.config}: вариантов {len(cfg.variants)}")
 
-    checks = run_checks(soffice)
+    checks = run_checks(soffice, cfg)
     for check in checks:
-        mark = "✓" if check.ok else "✗"
+        mark = "✓" if check.ok else ("✗" if check.blocking else "!")
         stream = sys.stdout if check.ok else sys.stderr
         print(f"{mark} {check.name}: {check.detail}", file=stream)
+        if not check.ok and check.affects:
+            print(f"    недоступно: {check.affects}", file=stream)
 
-    failed = [c.name for c in checks if not c.ok]
-    if failed:
-        print(f"\nНе хватает: {', '.join(failed)}. См. README, раздел «Сетап».", file=sys.stderr)
+    blocking = [c.name for c in checks if not c.ok and c.blocking]
+    degraded = [c.name for c in checks if not c.ok and not c.blocking]
+    if degraded:
+        print(
+            f"\nРаботает не всё: {', '.join(degraded)}. Остальное — как обычно.",
+            file=sys.stderr,
+        )
+    if blocking:
+        print(
+            f"\nБез этого прогон не пойдёт: {', '.join(blocking)}. "
+            "См. README, раздел «Сетап».",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
@@ -173,10 +192,34 @@ def _cmd_run(args: argparse.Namespace) -> int:
         Path(args.save_plan).write_text(
             prepared.plan.model_dump_json(indent=2), encoding="utf-8"
         )
-    with ThreadPoolExecutor(max_workers=len(laid_out)) as pool:
-        results = list(pool.map(complete_variant, laid_out))
+    # Отказ одного варианта не уносит остальные: собранные колоды остаются на
+    # диске и показываются, а упавший называется отдельно. Раньше исключение
+    # из `pool.map` обрывало весь прогон вместе с готовыми вариантами.
+    def _safe(laid):
+        try:
+            return complete_variant(laid)
+        except Exception as failure:
+            return failure
 
-    for variant, result in zip(variants, results, strict=True):
+    with ThreadPoolExecutor(max_workers=len(laid_out)) as pool:
+        outcomes = list(pool.map(_safe, laid_out))
+
+    failed_variants: list[str] = []
+    results = []
+    for variant, outcome in zip(variants, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            failed_variants.append(variant)
+            print(
+                f"[{variant}] ✗ вариант не собран: "
+                f"{type(outcome).__name__}: {outcome}",
+                file=sys.stderr,
+            )
+            continue
+        results.append(outcome)
+
+    for variant, result in zip(
+        [v for v in variants if v not in failed_variants], results, strict=True
+    ):
         manifest = result.manifest
         variant_seconds[variant] = manifest.generation_seconds
         template_parse_seconds += manifest.parse_seconds
@@ -259,7 +302,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
         f"всего {summary.total_seconds}с из {summary.budget_seconds}с "
         f"({'в бюджете' if summary.within_budget else 'ВНЕ БЮДЖЕТА'})"
     )
-    return 0
+    # Частичный результат остаётся результатом, но «успехом» не называется:
+    # ненулевой код возврата нужен CI и скриптам.
+    incomplete = [
+        f"{variant}: {', '.join(sorted(result.export_errors))}"
+        for variant, result in zip(
+            [v for v in variants if v not in failed_variants], results, strict=True
+        )
+        if result.export_errors
+    ]
+    if incomplete:
+        print("[прогон] ⚠ получены не все форматы — " + "; ".join(incomplete), file=sys.stderr)
+    if failed_variants:
+        print(
+            f"[прогон] ✗ не собраны варианты: {', '.join(failed_variants)}",
+            file=sys.stderr,
+        )
+    return 1 if (failed_variants or incomplete) else 0
 
 
 def _print_report(variant: str, report, manifest) -> None:
@@ -269,13 +328,17 @@ def _print_report(variant: str, report, manifest) -> None:
     него режим «остановиться с отчётом» не доведён до конца — выбрать было бы
     нечем.
     """
+    # Покрытие называется всегда и рядом с итогом: «находок нет» без
+    # знаменателя читается как «всё проверено», а проверено могло быть
+    # меньше половины — контекстные без модели, растровые без картинок.
     if not report.issues:
-        print(f"[{variant}] аудит: находок нет")
+        print(f"[{variant}] аудит: находок нет; {report.coverage}")
     else:
         automatic = len(report.auto_fixable)
         print(
             f"[{variant}] аудит: находок {len(report.issues)} "
-            f"(ошибок {report.error_count}, чинится само {automatic})"
+            f"(ошибок {report.error_count}, чинится само {automatic}); "
+            f"{report.coverage}"
         )
         for issue in report.issues:
             print(
@@ -283,7 +346,10 @@ def _print_report(variant: str, report, manifest) -> None:
                 f" — {issue.message} ({issue.fix.kind.value})"
             )
     if report.skipped_checks:
-        print(f"[{variant}] не выполнено проверок: {len(report.skipped_checks)}")
+        print(
+            f"[{variant}] не выполнено проверок: "
+            f"{len(report.skipped_checks)} из {report.checks_total}"
+        )
         for check_id, reason in sorted(report.skipped_checks.items()):
             print(f"[{variant}]   {check_id}: {reason}")
     if manifest.fix_mode == "review" and report.auto_fixable:

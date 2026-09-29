@@ -145,6 +145,28 @@ def _slide_body(slide: SlideIR) -> str:
     return "\n".join(lines) or "(текста нет)"
 
 
+# Отказы провайдера, которые повтор не лечит: модель отключена, ключ её не
+# открывает, такой модели нет. Замечаются один раз на прогон и больше не
+# повторяются — иначе аудит тратит минуты на заведомые отказы по каждому
+# слайду каждого варианта.
+_PERMANENT_MARKERS = (
+    "model disabled",
+    "permissiondenied",
+    "403",
+    "401",
+    "not found",
+    "does not exist",
+)
+#: Клиенты, отказавшие насовсем, и текст их отказа. Ключ — `id(client)`:
+#: у каждого прогона свой клиент, и чужой отказ на него не распространяется.
+_permanent: dict[int, str] = {}
+
+
+def _is_permanent(failure: BaseException) -> bool:
+    text = f"{type(failure).__name__} {failure}".lower()
+    return any(marker in text for marker in _PERMANENT_MARKERS)
+
+
 def _to_issue(answer: Answer, slide_index: int, bbox: Box | None = None) -> Issue | None:
     """Ответ «нет» становится находкой. Ответ «да» не становится ничем.
 
@@ -225,7 +247,10 @@ def _image_pass(
         page = pages[slide.index - 1] if slide.index - 1 < len(pages) else None
         if page is None or not Path(page).exists():
             return [], f"слайд {slide.index}: картинки нет, вопрос не задан"
-        planned = by_index.get(slide.index)
+        # По замыслу слайда, а не по его месту в колоде: после деления
+        # переполненного слайда и переноса текста обложки позиции сдвинуты, и
+        # поиск по позиции подставлял модели чужой заголовок либо пустой.
+        planned = by_index.get(slide.plan_index or slide.index)
         text = prompt.template.format(
             topic=plan.title,
             title=planned.takeaway_title if planned else "",
@@ -242,6 +267,11 @@ def _image_pass(
         def call() -> SlideAnswers:
             return client.complete("audit_slide", text, SlideAnswers, images=[image])
 
+        if _permanent.get(id(client)):
+            # Провайдер уже отказал так, что повтор ничего не изменит: модель
+            # отключена или ключ её не открывает. Спрашивать про каждый
+            # следующий слайд — тратить время прогона на заведомый отказ.
+            return [], f"слайд {slide.index}: {_permanent[id(client)]}"
         try:
             if shared is None:
                 answers = call()
@@ -250,6 +280,8 @@ def _image_pass(
                 key = hashlib.sha256(image + text.encode("utf-8")).hexdigest()
                 answers = shared.slide(key, call)
         except Exception as failure:  # отказ модели не должен ронять аудит
+            if _is_permanent(failure):
+                _permanent[id(client)] = str(failure)
             return [], f"слайд {slide.index}: {failure}"
         found = [
             issue

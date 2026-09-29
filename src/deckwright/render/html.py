@@ -25,6 +25,7 @@ import base64
 import html
 from pathlib import Path
 
+from deckwright.layout.text_metrics import DEFAULT_LINE_HEIGHT
 from deckwright.schemas import DeckIR, Element, ElementKind, SlideIR
 from deckwright.visuals.charts import format_value
 
@@ -103,6 +104,11 @@ def _text_html(element: Element, deck: DeckIR) -> str:
             f"font-weight:{'700' if style.bold else '400'};"
             f"font-style:{'italic' if style.italic else 'normal'};"
             f"text-align:{_ALIGN.get(style.align.value, 'left')};"
+            # Тем же интервалом, каким текст мерили и каким он записан в
+            # `.pptx`: умолчание браузера («normal») у разных шрифтов разное,
+            # и страница переносила строки не там, где PDF.
+            f"line-height:{DEFAULT_LINE_HEIGHT * style.line_spacing:.2f};"
+            f"margin:{style.space_before_pt:.1f}pt 0 {style.space_after_pt:.1f}pt;"
             f"padding-left:{style.size_pt * paragraph.level / 2:.1f}px"
         )
         marker = "• " if paragraph.bullet else ""

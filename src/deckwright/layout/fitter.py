@@ -158,12 +158,21 @@ def fit_paragraphs(
     ladder: list[float],
     start_pt: float,
     line_height: float = DEFAULT_LINE_HEIGHT,
+    indent_emu: int = 0,
 ) -> FitResult:
     """То же для списка абзацев: все они живут в одной рамке и одном кегле.
 
     Разный кегль у соседних пунктов одного списка — не вёрстка, а авария,
     поэтому ступень ищется общая: та, на которой помещается вся сумма.
+
+    `indent_emu` — висячий отступ маркера из спискового стиля шаблона. Он
+    съедает ширину строки, и не учесть его значит обещать меньше строк, чем
+    нарисует рендер: на `zelenie_investicii` расчёт давал три строки там,
+    где LibreOffice рисовал пять. Маркер ставится, когда абзацев больше
+    одного, — тогда же отступ и вычитается.
     """
+    if indent_emu > 0 and len(lines) > 1:
+        box = box.model_copy(update={"w": max(1, box.w - indent_emu)})
     usable_height = max(1, box.h - frame_inset_y(box))
     steps = [size for size in ladder if size <= start_pt] or [min(ladder)]
 

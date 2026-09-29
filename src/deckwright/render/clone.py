@@ -57,6 +57,68 @@ class ClonedRef:
     target: str
 
 
+def _partname_template(partname: str) -> str:
+    """Шаблон нумерации для имени части: `/ppt/charts/chart1.xml` → `…chart%d.xml`.
+
+    Хвостовые цифры основы — это и есть номер. У имени без номера номер
+    приписывается: `/ppt/media/image.png` → `/ppt/media/image%d.png`.
+    """
+    directory, _, filename = partname.rpartition("/")
+    stem, dot, extension = filename.rpartition(".")
+    if not dot:  # имя без расширения — редкость, но обрабатываем
+        stem, extension = filename, ""
+    base = stem.rstrip("0123456789") or stem
+    tail = f".{extension}" if extension else ""
+    return f"{directory}/{base}%d{tail}"
+
+
+def ensure_unique_partnames(prs: PresentationObject) -> list[tuple[str, str]]:
+    """Даёт каждой части пакета собственное имя. Возвращает переименования.
+
+    **Зачем.** Композиция клонируется с донорского слайда, и если донор нёс
+    график, его часть `/ppt/charts/chart1.xml` переприкрепляется к новому
+    слайду. Но между снятием слайдов и этим моментом мы успеваем добавить
+    **свой** нативный график, и python-pptx выбирает ему имя через
+    `next_partname`, который смотрит только на *достижимые* части
+    (`iter_parts()`). Донорская часть в этот момент осиротевшая — её не
+    видно, — и своему графику достаётся то же `/ppt/charts/chart1.xml`.
+    Дальше `_relink` возвращает донорскую часть в граф, и в пакете
+    оказываются **два разных объекта под одним именем**. `zipfile` пишет обе
+    записи, LibreOffice отвечает «source file could not be loaded», а
+    PowerPoint требует восстановления.
+
+    Воспроизведено на `zelenie_investicii`, вариант balanced: донор 8 несёт
+    график шаблона, а наш график встаёт на слайд 6.
+
+    **Что здесь делается и чего не делается.** Переименовывается объект
+    части — до записи файла. Ссылки чинить отдельно не нужно: связи хранят
+    ссылку на *объект*, а `Target` и `[Content_Types].xml` вычисляются из
+    текущего имени при сохранении. Часть, на которую ссылаются несколько
+    слайдов, остаётся одним объектом и сериализуется один раз — это законное
+    совместное использование, и его здесь не трогают. Удаление дублей из
+    готового архива — не то же самое и не годится: оно выкинуло бы один из
+    двух разных графиков.
+    """
+    package = prs.part.package
+    renamed: list[tuple[str, str]] = []
+    seen: dict[str, object] = {}
+    # `iter_parts()` обходит граф связей детерминированно, поэтому имя
+    # остаётся за первой встреченной частью, а результат воспроизводим.
+    for part in list(package.iter_parts()):
+        name = str(part.partname)
+        owner = seen.get(name)
+        if owner is None:
+            seen[name] = part
+            continue
+        if owner is part:  # одна часть, много ссылок — так и задумано
+            continue
+        fresh = package.next_partname(_partname_template(name))
+        part.partname = fresh
+        seen[str(fresh)] = part
+        renamed.append((name, str(fresh)))
+    return renamed
+
+
 def purge_slides(prs: PresentationObject) -> int:
     """Снимает все слайды, оставляя мастера, layout'ы, тему и шрифты.
 

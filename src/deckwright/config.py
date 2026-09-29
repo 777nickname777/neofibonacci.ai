@@ -215,6 +215,49 @@ class DeckConfig(BaseModel):
         return self
 
 
+class TypeConfig(BaseModel):
+    """Типографические границы, которые задаёт не шаблон, а мы.
+
+    Шаблон отвечает на вопрос «каким кеглем здесь принято»; читаемость —
+    вопрос к нам. Относительного предела (`SLOT_FLOOR_SHARE`) для неё мало:
+    три пятых от шести пунктов — всё ещё нечитаемо.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    # {роль места: минимальный кегль в pt}. Неизвестная роль — ошибка
+    # конфигурации с именем ключа, а не молчаливое игнорирование.
+    min_size_pt: dict[str, float] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _known_roles(self) -> TypeConfig:
+        from deckwright.schemas import SlotRole
+
+        known = {role.value for role in SlotRole}
+        unknown = sorted(set(self.min_size_pt) - known)
+        if unknown:
+            raise ValueError(
+                f"type.min_size_pt: неизвестные роли {', '.join(unknown)}; "
+                f"допустимые — {', '.join(sorted(known))}"
+            )
+        wrong = sorted(name for name, size in self.min_size_pt.items() if size <= 0)
+        if wrong:
+            raise ValueError(
+                f"type.min_size_pt: кегль обязан быть больше нуля, "
+                f"а у {', '.join(wrong)} он не такой"
+            )
+        return self
+
+
+class LayoutConfig(BaseModel):
+    """Правила раскладки, которые задаём мы, а не шаблон."""
+
+    model_config = ConfigDict(extra="forbid")
+    # Отступ вокруг защищённых зон — логотипов, полос оформления,
+    # колонтитулов. Доля меньшей стороны слайда: на 7.5″ это 0.075″ при
+    # 0.01. Текст не должен касаться логотипа, а не только не налезать.
+    protected_padding_share: float = Field(default=0.01, ge=0, le=0.1)
+
+
 class FontsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
@@ -231,6 +274,13 @@ class RenderConfig(BaseModel):
     soffice_binary: str = "soffice"
     soffice_timeout_seconds: int = Field(default=180, gt=0)
     png_dpi: int = Field(default=96, gt=0)
+    # Сколько конвертаций .pptx → .pdf идут одновременно. Каждый экземпляр
+    # LibreOffice — сотни мегабайт, и три варианта колоды плюс соседний прогон
+    # выбирали память машины: конвертация падала, а прогон падал вместе с ней.
+    max_parallel_conversions: int = Field(default=3, gt=0)
+    # Сколько раз повторить конвертацию при временном отказе. Отсутствующий
+    # бинарник и повреждённый вход не повторяются ни разу — результат тот же.
+    pdf_max_attempts: int = Field(default=3, gt=0)
 
 
 class AuditConfig(BaseModel):
@@ -319,6 +369,8 @@ class Config(BaseModel):
     run: RunConfig = Field(default_factory=RunConfig)
     template: TemplateConfig = Field(default_factory=TemplateConfig)
     deck: DeckConfig = Field(default_factory=DeckConfig)
+    type: TypeConfig = Field(default_factory=TypeConfig)
+    layout: LayoutConfig = Field(default_factory=LayoutConfig)
     variants: list[Variant] = Field(default_factory=list)
     llm: ModelConfig = Field(default_factory=ModelConfig)
     vlm: ModelConfig = Field(default_factory=ModelConfig)
@@ -340,6 +392,72 @@ class Config(BaseModel):
                 return v
         known = ", ".join(v.name for v in self.variants) or "—"
         raise KeyError(f"вариант {name!r} не найден; известны: {known}")
+
+
+# Корень репозитория: `src/deckwright/config.py` → вверх на два уровня.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Откуда берётся `.env`, в порядке убывания приоритета. Путь не зависит от
+# текущего рабочего каталога: раньше нативный запуск вообще не читал `.env`
+# (его подхватывал только `docker-compose` через `env_file`), и заполненный
+# файл ничего не менял — интерфейс говорил «модель не настроена».
+ENV_FILE_VAR = "DECKWRIGHT_ENV_FILE"
+
+_env_loaded: set[str] = set()
+
+
+def env_file_path(explicit: str | Path | None = None) -> Path:
+    """Где лежит `.env`: явный путь, переменная окружения или корень проекта."""
+    if explicit is not None:
+        return Path(explicit).expanduser().resolve()
+    override = os.environ.get(ENV_FILE_VAR)
+    if override:
+        return Path(override).expanduser().resolve()
+    return REPO_ROOT / ".env"
+
+
+def load_env_file(
+    path: str | Path | None = None, *, override: bool = False
+) -> list[str]:
+    """Читает `.env` в окружение процесса. Возвращает имена прочитанных ключей.
+
+    Приоритет: **уже заданная переменная окружения сильнее файла**. Так
+    `LLM_API_KEY=… deckwright run` перекрывает файл, а не наоборот, и
+    docker-compose, который кладёт переменные в окружение сам, остаётся
+    главным. `override=True` нужен только тестам.
+
+    Значения не возвращаются и никуда не печатаются — только имена ключей:
+    файл содержит ключи моделей и пароль интерфейса.
+
+    Формат простой и того же вида, что у `docker-compose`: `KEY=value`,
+    строки с `#` и пустые пропускаются, кавычки по краям снимаются. Отдельной
+    зависимости ради этого не добавляется.
+    """
+    target = env_file_path(path)
+    key = str(target)
+    if key in _env_loaded and not override:
+        return []
+    if not target.is_file():
+        return []
+    applied: list[str] = []
+    for raw in target.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if name.startswith("export "):
+            name = name[len("export "):].strip()
+        if not name.isidentifier():
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if override or name not in os.environ:
+            os.environ[name] = value
+            applied.append(name)
+    _env_loaded.add(key)
+    return applied
 
 
 def _expand_env(value: Any) -> Any:
@@ -373,6 +491,10 @@ def load_config(path: str | Path) -> Config:
     из какого каталога запущен процесс.
     """
     path = Path(path)
+    # `.env` читается до подстановки `${VAR}`: иначе ссылки в config.yaml
+    # раскрылись бы в пустые строки, и «модель не настроена» появлялось бы при
+    # заполненном файле. Единая точка для UI, CLI и тестов.
+    load_env_file()
     raw = _expand_env(_read_yaml(path))
 
     variant_refs = raw.pop("variants", []) or []
@@ -412,6 +534,19 @@ def load_config(path: str | Path) -> Config:
     config = Config.model_validate(raw)
     _ACTIVE.clear()
     _ACTIVE.update({agent.step: agent for agent in config.agents})
+    # Предел одновременных конвертаций — свойство машины, а не отдельного
+    # вызова: задаём его здесь, чтобы UI, CLI и тесты жили по одному числу.
+    from deckwright.render.pdf import configure_parallelism
+
+    configure_parallelism(config.render.max_parallel_conversions)
+    # Нижняя граница читаемости — свойство прогона, а не отдельного вызова
+    # вёрстки: задаётся здесь, чтобы UI, CLI и тесты жили по одним числам.
+    from deckwright.layout.strategy import configure_min_sizes
+
+    configure_min_sizes(config.type.min_size_pt)
+    from deckwright.layout.matcher import configure_protected_padding
+
+    configure_protected_padding(config.layout.protected_padding_share)
     return config
 
 

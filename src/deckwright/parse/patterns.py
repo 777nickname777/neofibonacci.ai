@@ -30,6 +30,7 @@ from itertools import pairwise
 
 from lxml import etree
 
+from deckwright.parse import tokens
 from deckwright.parse.geometry import iter_shapes
 from deckwright.schemas import (
     Align,
@@ -106,6 +107,53 @@ def _color_of(element: etree._Element) -> Color | None:
     """Цвет, которым донор пишет текст этой фигуры; None — не объявлен."""
     resolve = _COLOR_OF.get()
     return resolve(element) if resolve is not None else None
+
+
+# Гарнитуры темы: ими разрешаются ссылки `+mj-lt`/`+mn-lt` в фигурах донора.
+# Ставятся на время разбора одного слайда, как и резолвер цвета.
+_THEME_FONTS: ContextVar[dict[str, str] | None] = ContextVar(
+    "theme_fonts", default=None
+)
+
+
+def typeface_of(element: etree._Element) -> str | None:
+    """Гарнитура, которой донор набирает текст фигуры; None — не объявлена.
+
+    Сначала прогоны текста: ими набрано то, что видит читатель. Списочные
+    стили и `defRPr` идут следом — они задают умолчание фигуры. Ссылка на
+    тему разрешается здесь же: `+mn-lt` именем шрифта не является.
+    """
+    runs = [
+        node
+        for run in element.iter(f"{{{A_NS}}}r")
+        for node in run.iter(f"{{{A_NS}}}latin")
+    ]
+    for node in runs or list(element.iter(f"{{{A_NS}}}latin")):
+        face = tokens.resolve_typeface(node.get("typeface"), _THEME_FONTS.get() or {})
+        if face:
+            return face
+    return None
+
+
+def weight_of(element: etree._Element) -> tuple[bool | None, bool | None]:
+    """Начертание прогонов фигуры: (полужирное, курсив). None — не объявлено.
+
+    Не объявлено — значит наследуется от плейсхолдера или мастера, и
+    подменять это `False` нельзя: заголовок потерял бы полужирность, а
+    фиттер мерил бы его на 7-8 % уже, чем он будет нарисован.
+    """
+    marked = [run.find(f"{{{A_NS}}}rPr") for run in element.iter(f"{{{A_NS}}}r")]
+    marked = [node for node in marked if node is not None]
+    if not marked:
+        return None, None
+    bold = [node.get("b") for node in marked if node.get("b") is not None]
+    italic = [node.get("i") for node in marked if node.get("i") is not None]
+    return (
+        (sum(1 for value in bold if value == "1") * 2 >= len(marked)) if bold else None,
+        (sum(1 for value in italic if value == "1") * 2 >= len(marked))
+        if italic
+        else None,
+    )
 
 
 _ALGN = {"l": Align.LEFT, "ctr": Align.CENTER, "r": Align.RIGHT, "just": Align.JUSTIFY,
@@ -771,6 +819,7 @@ def mine_slide(
     is_dark: bool = False,
     inherited_slots: dict[SlotRole, Slot] | None = None,
     color_of: Callable[[etree._Element], Color | None] | None = None,
+    theme_fonts: dict[str, str] | None = None,
 ) -> Pattern | None:
     """Разбирает слайд-пример в композиционный паттерн.
 
@@ -781,6 +830,7 @@ def mine_slide(
     holdout-шаблоне).
     """
     token = _COLOR_OF.set(color_of)
+    fonts_token = _THEME_FONTS.set(theme_fonts or {})
     try:
         return _mine_slide(
             container, slide_index, slide_w, slide_h, layout_id, default_style, is_dark,
@@ -788,6 +838,7 @@ def mine_slide(
         )
     finally:
         _COLOR_OF.reset(token)
+        _THEME_FONTS.reset(fonts_token)
 
 
 # Нижняя доля слайда, где стоит номер страницы.
@@ -941,6 +992,25 @@ def _mine_slide(
         )
         if color is not None:
             style = style.model_copy(update={"color": color})
+        # Гарнитура и начертание — тем же правилом, что цвет: своё у фигуры,
+        # иначе унаследованное у плейсхолдера макета. Пусто — оставляем то,
+        # что уже стоит: подменять неизвестное умолчанием нельзя.
+        family = typeface_of(shape.element) or (
+            inherited.style.font_family
+            if inherited is not None and inherited.style is not None
+            else None
+        )
+        if family:
+            style = style.model_copy(update={"font_family": family})
+        bold, italic = weight_of(shape.element)
+        if bold is None and inherited is not None and inherited.style is not None:
+            bold = inherited.style.bold
+        if italic is None and inherited is not None and inherited.style is not None:
+            italic = inherited.style.italic
+        if bold is not None:
+            style = style.model_copy(update={"bold": bold})
+        if italic is not None:
+            style = style.model_copy(update={"italic": italic})
         align = text_align(shape.element) or (
             inherited.style.align
             if inherited is not None and inherited.style is not None

@@ -21,6 +21,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.presentation import Presentation as PresentationObject
 
+from deckwright.parse import surfaces
 from deckwright.parse import tokens as tokens_mod
 from deckwright.parse.bookends import (
     bookend_pattern,
@@ -37,12 +38,13 @@ from deckwright.parse.patterns import (
     text_align,
     text_valign,
 )
-from deckwright.parse.pictures import photo_boxes
+from deckwright.parse.pictures import background_grid, busy_regions, photo_boxes
 from deckwright.parse.recurring import find_recurring
 from deckwright.parse.semantics import classified
 from deckwright.schemas import (
     Box,
     Color,
+    Ground,
     LayoutSpec,
     Pattern,
     PatternClass,
@@ -311,6 +313,137 @@ def _master_style_color(
     return tokens_mod.resolve_color(def_rpr, theme, clr_map) if def_rpr is not None else None
 
 
+def _typeface_in(element: etree._Element) -> str | None:
+    """Гарнитура, объявленная внутри фигуры. None — не объявлена нигде.
+
+    Сначала смотрим прогоны текста: ими набрано то, что видит читатель.
+    Списочные стили и `defRPr` идут следом — они задают умолчание фигуры.
+    """
+    runs = [
+        node
+        for run in element.iter(f"{{{A_NS}}}r")
+        for node in run.iter(f"{{{A_NS}}}latin")
+    ]
+    for node in runs or list(element.iter(f"{{{A_NS}}}latin")):
+        face = node.get("typeface")
+        if face:
+            return face
+    return None
+
+
+def _resolved_typeface(
+    element: etree._Element, theme_fonts: dict[str, str]
+) -> str | None:
+    """Гарнитура фигуры с разрешённой ссылкой на тему (`+mj-lt`, `+mn-lt`)."""
+    return tokens_mod.resolve_typeface(_typeface_in(element), theme_fonts)
+
+
+def _master_style_typeface(
+    master, style_name: str, theme_fonts: dict[str, str]
+) -> str | None:
+    """Гарнитура первого уровня раздела `p:txStyles` мастера."""
+    tx_styles = master._element.find(f"{{{P_NS}}}txStyles")
+    node = tx_styles.find(f"{{{P_NS}}}{style_name}") if tx_styles is not None else None
+    level = node.find(f"{{{A_NS}}}lvl1pPr") if node is not None else None
+    def_rpr = level.find(f"{{{A_NS}}}defRPr") if level is not None else None
+    face = def_rpr.find(f"{{{A_NS}}}latin") if def_rpr is not None else None
+    return tokens_mod.resolve_typeface(
+        face.get("typeface") if face is not None else None, theme_fonts
+    )
+
+
+def _master_placeholder_typeface(
+    master, element: etree._Element, theme_fonts: dict[str, str]
+) -> str | None:
+    """Гарнитура плейсхолдера мастера того же типа — звено наследования OOXML."""
+    ph = element.find(f".//{{{P_NS}}}ph")
+    wanted = ph.get("type", "body") if ph is not None else "body"
+    for shape in master.placeholders:
+        node = shape._element.find(f".//{{{P_NS}}}ph")
+        kind = node.get("type", "body") if node is not None else "body"
+        if _PH_ROLE.get(kind) is not _PH_ROLE.get(wanted):
+            continue
+        face = _resolved_typeface(shape._element, theme_fonts)
+        if face:
+            return face
+    return None
+
+
+def _placeholder_typeface(
+    layout, element: etree._Element, role: SlotRole, theme_fonts: dict[str, str]
+) -> str | None:
+    """Чем на самом деле будет набран этот плейсхолдер.
+
+    Цепочка наследования OOXML, звено за звеном: сам плейсхолдер → тот же
+    плейсхолдер мастера → раздел `p:txStyles` мастера → шрифт темы по роли.
+    Последнее звено — не догадка, а правило формата: заголовок берёт
+    `majorFont`, остальной текст `minorFont`. Без него заголовки колоды
+    мерились гарнитурой основного текста, а рисовались заголовочной
+    (`Calibri` против `Calibri Light` на `finansy`).
+    """
+    master = layout.slide_master
+    found = (
+        _resolved_typeface(element, theme_fonts)
+        or _master_placeholder_typeface(master, element, theme_fonts)
+        or _master_style_typeface(
+            master, _MASTER_STYLE_BY_ROLE.get(role, "otherStyle"), theme_fonts
+        )
+    )
+    if found:
+        return found
+    return theme_fonts.get("major" if role is SlotRole.TITLE else "minor")
+
+
+def _weight_in(element: etree._Element) -> tuple[bool | None, bool | None]:
+    """Начертание прогонов фигуры: (полужирное, курсив). None — не объявлено.
+
+    Не объявлено — значит наследуется, и подменять это `False` нельзя:
+    заголовок, которому полужирность задаёт мастер, стал бы обычным.
+    """
+    marked = [
+        run.find(f"{{{A_NS}}}rPr")
+        for run in element.iter(f"{{{A_NS}}}r")
+    ]
+    marked = [node for node in marked if node is not None]
+    if not marked:
+        return None, None
+    bold = [node.get("b") for node in marked if node.get("b") is not None]
+    italic = [node.get("i") for node in marked if node.get("i") is not None]
+    return (
+        (sum(1 for value in bold if value == "1") * 2 >= len(marked)) if bold else None,
+        (sum(1 for value in italic if value == "1") * 2 >= len(marked))
+        if italic
+        else None,
+    )
+
+
+def _master_placeholder_weight(master, element: etree._Element, role) -> bool | None:
+    """Полужирность, которую плейсхолдер наследует от мастера.
+
+    Заголовки большинства шаблонов объявлены полужирными не на слайде, а в
+    `p:txStyles` мастера. Без этого звена фиттер мерил заголовок обычным
+    начертанием, а рисовался он полужирным — на 7-8 % шире.
+    """
+    ph = element.find(f".//{{{P_NS}}}ph")
+    wanted = ph.get("type", "body") if ph is not None else "body"
+    for shape in master.placeholders:
+        node = shape._element.find(f".//{{{P_NS}}}ph")
+        kind = node.get("type", "body") if node is not None else "body"
+        if _PH_ROLE.get(kind) is not _PH_ROLE.get(wanted):
+            continue
+        bold, _ = _weight_in(shape._element)
+        if bold is not None:
+            return bold
+        break
+    tx_styles = master._element.find(f"{{{P_NS}}}txStyles")
+    name = _MASTER_STYLE_BY_ROLE.get(role, "otherStyle")
+    node = tx_styles.find(f"{{{P_NS}}}{name}") if tx_styles is not None else None
+    level = node.find(f"{{{A_NS}}}lvl1pPr") if node is not None else None
+    def_rpr = level.find(f"{{{A_NS}}}defRPr") if level is not None else None
+    value = def_rpr.get("b") if def_rpr is not None else None
+    return value == "1" if value is not None else None
+
+
 def _master_placeholder_size_pt(master, element: etree._Element) -> float | None:
     """Кегль плейсхолдера мастера того же типа — звено наследования OOXML.
 
@@ -342,6 +475,7 @@ def _layout_slots(
     clr_map,
     fallback: Color,
     master_sizes: dict[str, float],
+    theme_fonts: dict[str, str] | None = None,
 ) -> list[Slot]:
     slots: list[Slot] = []
     for shape in layout.placeholders:
@@ -364,6 +498,19 @@ def _layout_slots(
         updates = {"color": color}
         if size:
             updates["size_pt"] = size
+        # Гарнитура и начертание — свои у каждого места. Раньше всем
+        # доставалась одна гарнитура колоды, и заголовок, который шаблон
+        # набирает заголовочным шрифтом темы, мерился основным.
+        family = _placeholder_typeface(layout, shape._element, role, theme_fonts or {})
+        if family:
+            updates["font_family"] = family
+        bold, italic = _weight_in(shape._element)
+        if bold is None:
+            bold = _master_placeholder_weight(layout.slide_master, shape._element, role)
+        if bold is not None:
+            updates["bold"] = bold
+        if italic is not None:
+            updates["italic"] = italic
         align = text_align(shape._element) or _master_align(layout.slide_master, shape._element)
         if align is not None:
             updates["align"] = align
@@ -478,6 +625,11 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
     layouts: list[LayoutSpec] = []
     masters: list[str] = []
     layout_ids: dict[int, str] = {}
+    # Ограничения макета под слайдом: их надо знать и композиции, а не только
+    # самому макету — вёрстка выбирает место именно по композиции.
+    obstacles_by_layout: dict[str, list[Box]] = {}
+    backdrops_by_layout: dict[str, list[Box]] = {}
+    imagery_by_layout: dict[str, list[Box]] = {}
     for m_index, master in enumerate(prs.slide_masters):
         master_id = f"master{m_index + 1}"
         masters.append(master_id)
@@ -517,7 +669,24 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
             fallback = readable_text_color(palette, background, dark) or (
                 Color(rgb="FFFFFF") if dark else Color(rgb="111111")
             )
+            visible = (
+                surfaces.collect(
+                    layout._element, layout.part, master._element, master.part,
+                    slide_w, slide_h,
+                )
+                if layout_tree is not None
+                else []
+            )
+            # Не просто «поверх чего нельзя писать», а защищённые зоны:
+            # логотип из нескольких фигур склеен в одну, рамка во весь
+            # слайд сведена к видимым полосам по краям, колонтитулы и
+            # номера страниц учтены.
+            layout_obstacles = surfaces.protected(visible, slide_w, slide_h)
+            layout_backdrops = surfaces.backdrops(visible)
             layout_id = f"{master_id}/layout{l_index + 1}"
+            obstacles_by_layout[layout_id] = layout_obstacles
+            backdrops_by_layout[layout_id] = layout_backdrops
+            imagery_by_layout[layout_id] = surfaces.imagery(visible)
             layout_ids[id(layout._element)] = layout_id
             layouts.append(
                 LayoutSpec(
@@ -525,8 +694,14 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                     name=layout.name,
                     master_id=master_id,
                     slots=_layout_slots(
-                        layout, base_style, theme, clr_map, fallback, master_sizes
+                        layout, base_style, theme, clr_map, fallback, master_sizes,
+                        theme_fonts,
                     ),
+                    # Оформление макета и образца в координатах слайда.
+                    # Раньше эти элементы не доезжали до вёрстки вовсе, и
+                    # текст ложился поверх картинок шаблона.
+                    decor_boxes=layout_obstacles,
+                    backdrop_boxes=layout_backdrops,
                     background=background,
                     is_dark=dark,
                 )
@@ -582,6 +757,7 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                 else None
             ),
             color_of=lambda element: _text_color(element, theme, primary_map),
+            theme_fonts=theme_fonts,
         )
         if pattern is not None:
             # Локальный фон каждого слота: на чём лежит текст этого места.
@@ -598,6 +774,15 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                         )
                         for slot in pattern.slots
                     ],
+                    "grounds": _grounds(
+                        tree,
+                        theme,
+                        primary_map,
+                        effective,
+                        slide_w,
+                        slide_h,
+                        backgrounds=_background_sources(slide),
+                    ),
                     "figure_pictures": _figure_pictures(tree),
                     "background": own_bg,
                     "photo_slots": photo_boxes(
@@ -607,6 +792,15 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                         bg_node, slide.part
                     ),
                     "decor": _decor(tree, pattern, slide_w, slide_h),
+                    "layout_obstacles": obstacles_by_layout.get(layout_id, [])
+                    + _slide_obstacles(tree, slide.part, pattern, slide_w, slide_h)
+                    # Оформление, запечённое в фоновую картинку: логотипы
+                    # партнёров ЛЦТ2026 — часть фона, а не фигуры слайда.
+                    + _background_decor(slide, slide_w, slide_h),
+                    "layout_backdrops": backdrops_by_layout.get(layout_id, [])
+                    + surfaces.backdrops(
+                        surfaces.collect_tree(tree, slide.part, slide_w, slide_h)
+                    ),
                     "baked_items": bool(pattern.repeaters)
                     and _layout_draws_items(slide.slide_layout, layout_use, slide_w, slide_h),
                     "repeaters": [
@@ -634,7 +828,12 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
             )
             pattern = _sequence_ordinals(pattern, tree)
             if not titles_declared:
-                pattern = _table_grid(_grown_frames(tree, pattern, slide_w, slide_h))
+                pattern = _table_grid(
+                    _grown_frames(
+                        tree, pattern, slide_w, slide_h,
+                        obstacles=obstacles_by_layout.get(layout_id, []),
+                    )
+                )
             patterns.append(classified(pattern, slide_w, slide_h))
         backdrops[index] = effective
         own_backgrounds[index] = (
@@ -663,6 +862,8 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
             slide_w,
             slide_h,
             is_dark=backdrop is not None and backdrop.luminance < 0.5,
+            obstacles=obstacles_by_layout.get(layout_id, []),
+            pictures=imagery_by_layout.get(layout_id, []),
         )
         if bookend is not None:
             # Повторители того же слайда — спикеры, контакты: неиспользованный
@@ -685,6 +886,33 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
                     "background_signature": signature,
                     "photo_slots": photo_boxes(
                         slide.shapes._spTree, slide.part, slide_w, slide_h
+                    ),
+                    # Обложка и финал строятся отдельным путём, но оформление
+                    # макета им нужно ровно так же: именно на обложке
+                    # `vk_tech` подзаголовок и уезжал на картинку макета.
+                    "layout_obstacles": obstacles_by_layout.get(layout_id, [])
+                    + _slide_obstacles(
+                        slide.shapes._spTree, slide.part, bookend, slide_w, slide_h
+                    )
+                    + _background_decor(slide, slide_w, slide_h),
+                    # Фон донора обложке и финалу нужен так же, как всем: без
+                    # него цвет текста выбирался по «шаблон светлый», и на
+                    # тёмно-фиолетовой обложке ЛЦТ2026 заголовок выходил
+                    # чёрным — 2.6:1.
+                    "grounds": _grounds(
+                        slide.shapes._spTree,
+                        theme,
+                        primary_map,
+                        color,
+                        slide_w,
+                        slide_h,
+                        backgrounds=_background_sources(slide),
+                    ),
+                    "layout_backdrops": backdrops_by_layout.get(layout_id, [])
+                    + surfaces.backdrops(
+                        surfaces.collect_tree(
+                            slide.shapes._spTree, slide.part, slide_w, slide_h
+                        )
                     ),
                 }
             )
@@ -727,6 +955,7 @@ def _parse(path: Path, font_dir: Path | None) -> TemplateSpec:
         source_name=path.name,
         slide_width_emu=slide_w,
         slide_height_emu=slide_h,
+        bullet_indent_emu=_list_indent(prs),
         palette=palette,
         fonts=fonts,
         type_scale_pt=type_scale,
@@ -891,6 +1120,106 @@ _THIN = 91_440  # 0.1″: линия
 _ICON = 548_640  # 0.6″: значок
 
 
+# Доля слайда, начиная с которой `_decor` перестаёт разбирать фигуру сам:
+# по габаритам крупной фигуры не отличить наложение от замысла. Ровно эти
+# фигуры и приходят разобранными по содержанию из `parse.surfaces`.
+DECOR_AREA_SHARE = 0.5
+
+
+# Заливка мельче этой доли слайда — не фон текста, а точка оформления.
+_GROUND_MIN_AREA = 0.002
+
+
+def _background_sources(slide):
+    """Где искать фон-картинку: слайд, его макет, образец — в этом порядке."""
+    layout = slide.slide_layout
+    master = layout.slide_master
+    return [
+        (tokens_mod.own_background(slide._element), slide.part),
+        (tokens_mod.own_background(layout._element), layout.part),
+        (tokens_mod.own_background(master._element), master.part),
+    ]
+
+
+def _background_decor(slide, slide_w: int, slide_h: int) -> list[Box]:
+    """Графика внутри фона-картинки: её тоже нельзя закрывать текстом."""
+    for background, part in _background_sources(slide):
+        found = busy_regions(background, part, slide_w, slide_h)
+        if found:
+            return found
+    return []
+
+
+def _grounds(
+    tree, theme, clr_map, base, slide_w: int, slide_h: int, backgrounds=()
+) -> list[Ground]:
+    """Всё залитое на слайде-доноре: на чём угодно из этого может лечь текст.
+
+    Записывается фактом разбора, потому что цвет текста нельзя решать по
+    слоту: у блока слота может не быть (свободная полоса, элемент
+    повторителя, подпись под числом), а фон под ним есть всегда. Вёрстка
+    выбирает цвет по итоговой рамке и по этим областям.
+    """
+    slide = Box(x=0, y=0, w=slide_w, h=slide_h)
+    # Фон-картинка лежит ниже всего: любая заливка её закрывает.
+    cells: list[tuple[Box, str]] = []
+    for background, part in backgrounds:
+        cells = background_grid(background, part, slide_w, slide_h)
+        if cells:
+            break
+    found = [Ground(box=box, colors=[Color(rgb=rgb)], z=-1) for box, rgb in cells]
+    return found + [
+        Ground(box=box, colors=colors, z=order)
+        for box, colors, order in tokens_mod.ground_regions(
+            tree, slide, theme, clr_map, base, min_share=_GROUND_MIN_AREA
+        )
+    ]
+
+
+def _slide_obstacles(tree, part, pattern: Pattern, slide_w: int, slide_h: int) -> list[Box]:
+    """Крупные элементы самого слайда-образца, поверх которых писать нельзя.
+
+    `_decor` отбирает по площади и намеренно грубо: фигура крупнее половины
+    слайда чаще всего заливка, по которой текст и должен лежать. Но площадь
+    не отличает заливку от фотографии, поэтому крупное приходит сюда — уже
+    расклассифицированным по содержанию (`parse.surfaces`).
+
+    Берётся ровно то, что `_decor` отбросил, — крупнее порога. Всё, что мельче,
+    он разбирает сам и знает про слоты композиции; дублировать его работу
+    здесь значит объявить препятствием карточки самой композиции.
+
+    Места композиции исключаются и тут: слот — это место под наш текст, а не
+    препятствие для него. Место под фотографию — тоже: донорское фото туда
+    не переносится, там будет наша картинка.
+    """
+    visible = [
+        surface
+        for surface in surfaces.collect_tree(tree, part, slide_w, slide_h)
+        if surface.box.area >= DECOR_AREA_SHARE * slide_w * slide_h
+    ]
+    keep = [slot.box for slot in pattern.slots] + list(pattern.photo_slots)
+    keep += [
+        Box(x=slot.box.x + dx, y=slot.box.y + dy, w=slot.box.w, h=slot.box.h)
+        for repeater in pattern.repeaters
+        for dx, dy in repeater.member_offsets
+        for slot in repeater.item_slots
+    ]
+    # Сначала отсев, потом защита. Места композиции — не препятствие, и
+    # узнать их можно только по исходной рамке: защита её растит и
+    # склеивает соседние, и карточки самого слайда переставали совпадать
+    # со своими слотами. На шаблоне экзаменов из-за этого три карточки
+    # оказались запрещены, и три пункта уехали в одну.
+    own = [
+        surface
+        for surface in visible
+        if not any(
+            _same_rect(surface.box, slot) or _covers_most(surface.box, slot)
+            for slot in keep
+        )
+    ]
+    return surfaces.protected(own, slide_w, slide_h)
+
+
 def _decor(tree, pattern, slide_w: int, slide_h: int) -> list[Box]:
     """Графика донора, на которую текст не должен заходить.
 
@@ -913,7 +1242,7 @@ def _decor(tree, pattern, slide_w: int, slide_h: int) -> list[Box]:
         body = element.find(f"{{{P_NS}}}txBody")
         if body is not None and "".join(n.text or "" for n in body.iter(f"{{{A_NS}}}t")).strip():
             continue
-        if box.w * box.h >= 0.5 * slide_w * slide_h:
+        if box.w * box.h >= DECOR_AREA_SHARE * slide_w * slide_h:
             continue
         if any(_covers_most(text, box) for text in texts):
             continue
@@ -989,7 +1318,13 @@ def _room_below(box: Box, shapes: list[tuple[Box, bool]], slide_h: int) -> int:
     return max(box.h, limit - box.y - _GROWTH_GAP)
 
 
-def _grown_frames(tree, pattern: Pattern, slide_w: int, slide_h: int) -> Pattern:
+def _grown_frames(
+    tree,
+    pattern: Pattern,
+    slide_w: int,
+    slide_h: int,
+    obstacles: list[Box] | None = None,
+) -> Pattern:
     """Рамки текста шаблона-бланка — во всё свободное место под ними.
 
     Шаблон без плейсхолдеров набирает каждую надпись в рамку ровно под
@@ -1007,6 +1342,12 @@ def _grown_frames(tree, pattern: Pattern, slide_w: int, slide_h: int) -> Pattern
         and box.area < 0.5 * slide_w * slide_h
         and not _is_line_shape(element)
     ]
+    # Оформление макета останавливает рост так же, как фигуры слайда. Без
+    # этого рамка подзаголовка обложки `vk_tech` вырастала с 0.31 до 0.94
+    # дюйма прямо поверх картинки макета: препятствие лежало в макете, а
+    # `_room_below` смотрел только на слайд. Порог площади здесь не нужен —
+    # эти рамки уже отобраны как запрещающие текст.
+    shapes += [(box, False) for box in (obstacles or [])]
 
     def grow(slot: Slot, offsets: list[tuple[int, int]]) -> Slot:
         if slot.role not in _GROWING_ROLES:
@@ -1241,6 +1582,27 @@ def _member_align(tree, box: Box):
     return None
 
 
+def _list_indent(prs: PresentationObject) -> int:
+    """Висячий отступ маркера списка из спискового стиля образца, EMU.
+
+    Первый уровень `bodyStyle` — тот, которым шаблон набирает списки на
+    содержательных слайдах. Отступ наследуется молча: на фигуре донора его
+    нет, а в рендере он есть.
+    """
+    found = 0
+    for master in prs.slide_masters:
+        node = master._element.find(
+            f".//{{{P_NS}}}txStyles/{{{P_NS}}}bodyStyle/{{{A_NS}}}lvl1pPr"
+        )
+        if node is None:
+            continue
+        try:
+            found = max(found, int(node.get("marL", "0")))
+        except ValueError:
+            continue
+    return found
+
+
 def _parser_fingerprint() -> str:
     """Отпечаток исходников разбора: правка парсера сбрасывает кэш сама.
 
@@ -1253,6 +1615,14 @@ def _parser_fingerprint() -> str:
     package = Path(__file__).resolve().parent
     for source in sorted(package.glob("*.py")):
         digest.update(source.read_bytes())
+    # Схема входит в отпечаток наравне с разбором: `TemplateSpec` пополнился
+    # ограничениями макета, и кэш, записанный до этого, описывает шаблон без
+    # них. Без этой строки старый кэш продолжал бы отдавать композиции, для
+    # которых слайд — пустой холст.
+    digest.update((package.parent / "schemas" / "template_spec.py").read_bytes())
+    # И общие типы: `TextStyle` и `Box` лежат внутри `TemplateSpec`, и их
+    # смысл — часть того, что записано в кэш.
+    digest.update((package.parent / "schemas" / "common.py").read_bytes())
     return digest.hexdigest()[:12]
 
 

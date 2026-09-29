@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import re
 
+from deckwright.content.grounding import is_grounded
 from deckwright.schemas import ContentPack, Figure, FigureKind
 
 # Насколько посчитанное может разойтись с написанным. Округление до одного
@@ -93,6 +94,34 @@ def evaluate_formula(formula: str, values: dict[str, float]) -> float:
     except SyntaxError as exc:
         raise FormulaError(f"формула {formula!r} не разбирается") from exc
     return _evaluate(tree, values)
+
+
+def source_of(figure: Figure, pack: ContentPack) -> str | None:
+    """Где во входе лежит это число — если лежит хоть где-нибудь.
+
+    Нужно, чтобы отличить две разные беды. Выдуманное число — ошибка по
+    существу: такого во входе нет вовсе. Перепутанная ссылка — ошибка
+    бухгалтерии: число верное и взято из документа, но объявлено
+    процитированным не оттуда. На живом прогоне (`finansy`, run 34) модель
+    сослала все числа таблиц на факт-тему «выручка 47,3 млн», и правильная
+    колода получила десять ошибок «число не из источников» из двадцати одной
+    находки. Считать это выдумкой — значит не верить верной колоде.
+
+    Возвращает имя источника («ряд s1», «факт f4») или None.
+    """
+    written = parse_number(figure.text)
+    if written is None:
+        return None
+    target = {abs(written)}
+    for series in pack.series:
+        if any(is_grounded(abs(point.value), target) for point in series.points):
+            return f"ряд {series.id} «{series.name}»"
+    for fact in pack.facts:
+        values = {fact.value} if fact.value is not None else set()
+        values |= numbers_in(fact.text)
+        if any(is_grounded(abs(value), target) for value in values):
+            return f"факт {fact.id}"
+    return None
 
 
 def verify(figure: Figure, pack: ContentPack) -> str | None:

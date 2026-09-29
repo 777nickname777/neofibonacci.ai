@@ -124,6 +124,36 @@ def test_numbers_are_found_in_any_spelling():
     assert ungrounded("выросло с 71 % до 88 % за 3 месяца", numbers, small=10) == [88.0]
 
 
+def test_a_falling_number_is_still_the_number_of_the_input():
+    """Знак — направление, а не другое число.
+
+    Живой отчёт о продажах: в таблице стоит «−6» типографским минусом,
+    модель вернула факт «корпоративные заказы снизились на 6 %» со
+    значением −6, и настоящее число из документа выбрасывалось как
+    выдуманное. Числа входа собираются выражением, которое начинается с
+    цифры, — знака в них нет и быть не может.
+    """
+    typographic = source_numbers("Корпоративные заказы 3,4 7 \u22126")
+    assert typographic == {3.4, 7.0, 6.0}
+    assert is_grounded(-6, typographic)
+    assert is_grounded(-6, source_numbers("Корпоративные заказы 3,4 7 -6"))
+    # Проценты и тысячи по-прежнему раскрываются, знак этому не мешает.
+    assert is_grounded(-0.06, {6.0})
+    # И граница на месте: −9 во входе нет ни с каким знаком.
+    assert not is_grounded(-9, typographic)
+
+
+def test_a_series_is_not_lost_because_one_point_falls():
+    """Одна отрицательная точка не уносит весь ряд.
+
+    Ряд отбрасывается целиком, если хоть одно его значение не нашлось во
+    входе. Колонка динамики «+8 / +41 / −6» из таблицы отчёта уносила бы
+    с собой весь график.
+    """
+    numbers = source_numbers("Зал 30,7 65 +8\nДоставка 8,5 18 +41\nКорпоративные 3,4 7 \u22126")
+    assert all(is_grounded(value, numbers) for value in (8, 41, -6))
+
+
 def test_label_digit_is_not_a_thousands_group():
     """«Q1 412» из строки таблицы — квартал и значение, а не число 1 412."""
     assert source_numbers("Q1 412\nQ2 365") == {1.0, 2.0, 412.0, 365.0}
@@ -283,15 +313,36 @@ def test_foreign_json_goes_through_the_model(inputs):
     assert FOREIGN_JSON["pilot"]["participants"] == 230
 
 
-def test_long_input_is_cut_to_the_budget_with_a_warning(inputs):
+def test_long_input_is_read_in_parts_not_cut(inputs):
+    """Длинный вход делится по смысловым границам, а не срезается по началу.
+
+    Прежде всё, что не влезло в бюджет одного запроса, отбрасывалось: до
+    модели доходило только начало, а середина и конец отчёта — нет. Теперь
+    вход читается по частям, и каждая часть несёт бриф: без него вторая
+    половина документа разбиралась бы без темы и назначения колоды.
+    """
+    from deckwright.content.readers import read_file
+
     client = StubClient({"topic": "Тема"})
     result = ingest(
         IngestInput(text=BRIEF, files=[inputs / "crm_report.docx"]), client, max_chars=1500
     )
-    assert len(client.prompts[0]) < 1500 + 4000  # плюс сам текст промпта
-    assert any("crm_report.docx" in warning for warning in result.warnings)
-    # Короткий бриф не обрезается ради длинного документа.
-    assert BRIEF in client.prompts[0]
+    assert client.calls > 1, "длинный документ ушёл одним запросом"
+    for text in client.prompts:
+        assert len(text) < 1500 + 4000  # плюс сам текст промпта
+        assert BRIEF in text, "часть ушла без брифа"
+
+    # Ни один фрагмент документа не потерян: каждый виден хотя бы в одном
+    # запросе. Это и есть требование «середина не исчезает».
+    source = read_file(inputs / "crm_report.docx", "d1")
+    everything = "\n".join(client.prompts)
+    missing = [
+        fragment.text
+        for fragment in source.fragments
+        if len(fragment.text.strip()) >= 12 and fragment.text.strip() not in everything
+    ]
+    assert not missing, f"до модели не дошло: {missing[:3]}"
+    assert any("по частям" in warning for warning in result.warnings)
 
 
 def test_empty_input_is_refused():

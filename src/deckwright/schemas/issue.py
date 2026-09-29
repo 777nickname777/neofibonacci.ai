@@ -120,6 +120,25 @@ class AuditReport(BaseModel):
     # Проверки, которые не выполнялись, и почему: например, контекстные при
     # отсутствии доступа к модели. Честнее, чем молча вернуть пустой список.
     skipped_checks: dict[str, str] = Field(default_factory=dict)
+    # Сколько проверок вообще есть в реестре. Без знаменателя «нарушений не
+    # найдено» читается как «всё проверено», хотя половина могла не
+    # выполняться: контекстные без модели, растровые без картинок.
+    checks_total: int = 0
+
+    @property
+    def checks_run(self) -> int:
+        """Сколько проверок действительно выполнено."""
+        return max(0, self.checks_total - len(self.skipped_checks))
+
+    @property
+    def coverage(self) -> str:
+        """Покрытие одной строкой — для отчёта, интерфейса и журнала."""
+        if not self.checks_total:
+            return "покрытие неизвестно"
+        line = f"проверок выполнено {self.checks_run} из {self.checks_total}"
+        if self.skipped_checks:
+            line += f", пропущено {len(self.skipped_checks)}"
+        return line
 
     def for_slide(self, index: int) -> list[Issue]:
         return [i for i in self.issues if i.slide_index == index]

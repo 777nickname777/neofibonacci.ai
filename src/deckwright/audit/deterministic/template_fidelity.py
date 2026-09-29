@@ -155,7 +155,28 @@ def contrast(
         # Мерится по фону, на котором текст лежит: подложка элемента, если
         # она есть, иначе фон слайда.
         backdrop = element.backdrop or slide.background
-        if element.text is None or backdrop is None:
+        if element.text is None or not any(
+            p.text.strip() for p in element.text.paragraphs
+        ):
+            continue
+        if backdrop is None or _over_imagery(element, slide, spec):
+            # Под текстом фотография, градиент или неизвестно что: контраст
+            # по одному цвету тут не считается. Молчать нельзя — непроверенное
+            # выдавалось бы за проверенное, и отчёт врал бы про покрытие.
+            found.append(
+                _issue(
+                    "template.contrast_unverified",
+                    slide.index,
+                    f"{element.id}: контраст не измерен — "
+                    + (
+                        "под текстом изображение шаблона"
+                        if backdrop is not None
+                        else "цвет фона под текстом неизвестен"
+                    ),
+                    element_ids=[element.id],
+                    bbox=element.box,
+                )
+            )
             continue
         warned = False
         for paragraph in element.text.paragraphs:
@@ -194,6 +215,32 @@ def contrast(
                 )
             )
     return found
+
+
+def _over_imagery(element, slide, spec) -> bool:
+    """Лежит ли текст на изображении шаблона, где цвет фона не один.
+
+    Подложка элемента (`backdrop`) — ровный цвет, на нём контраст считается.
+    А вот фотография и градиент макета одного цвета не имеют: мерить по
+    среднему — выдавать догадку за измерение.
+    """
+    if element.backdrop is not None or spec is None:
+        return False
+    # `spec` сюда приходит и урезанным: проверке контраста от него нужен
+    # только `writes_on`, и тесты подставляют заглушку с одним этим методом.
+    patterns = getattr(spec, "patterns", None)
+    if not patterns:
+        return False
+    pattern = next((p for p in patterns if p.id == slide.pattern_id), None)
+    if pattern is None:
+        return False
+    for picture in pattern.layout_obstacles:
+        hit = picture.intersection(element.box)
+        if hit is None:
+            continue
+        if hit.w * hit.h >= 0.6 * element.box.w * element.box.h:
+            return True
+    return False
 
 
 # Контраст, при котором крупный текст читается (WCAG для крупного — 3:1).
@@ -324,6 +371,45 @@ def recurring_elements(slide: SlideIR, spec: TemplateSpec) -> list[Issue]:
     return found
 
 
+def too_small(slide: SlideIR, spec: TemplateSpec) -> list[Issue]:
+    """Текст мельче читаемого минимума своей роли.
+
+    Минимум задан в `configs/config.yaml` (`type.min_size_pt`) и приведён к
+    этому шаблону: пересчитан по высоте слайда и ограничен типичным кеглем,
+    которым шаблон эту роль набирает. Требовать от плотного справочника
+    кегля презентации не за что — а сказать, что подпись вышла мельче
+    читаемой, есть за что.
+
+    Проверка не чинит вёрстку: жёсткая граница снизу заставляла выбирать
+    композицию, где текст не помещается вовсе, и слайд разваливался. Здесь
+    конфликт «объём текста против дизайна шаблона» называется, а решение
+    остаётся человеку.
+    """
+    from deckwright.layout.strategy import readable_floor
+
+    found: list[Issue] = []
+    for element in slide.all_elements():
+        if element.text is None or not element.text.paragraphs:
+            continue
+        floor = readable_floor(spec, element.role)
+        if not floor:
+            continue
+        size = min(p.style.size_pt for p in element.text.paragraphs)
+        if size >= floor - 0.01:
+            continue
+        found.append(
+            _issue(
+                "template.text_too_small",
+                slide.index,
+                f"{element.id}: {size:g} pt при читаемом минимуме "
+                f"{floor:g} pt для роли «{element.role.value}»",
+                element_ids=[element.id],
+                bbox=element.box,
+            )
+        )
+    return found
+
+
 def run(
     deck: DeckIR, spec: TemplateSpec, min_contrast: float = MIN_CONTRAST
 ) -> list[Issue]:
@@ -335,6 +421,7 @@ def run(
         found.extend(text_on_fill(slide, spec))
         found.extend(layout_reference(slide, spec))
         found.extend(recurring_elements(slide, spec))
+        found.extend(too_small(slide, spec))
     return found
 
 

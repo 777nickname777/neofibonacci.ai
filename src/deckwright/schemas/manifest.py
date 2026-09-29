@@ -82,6 +82,27 @@ class ModelUsage(BaseModel):
         return self.prompt_tokens + self.completion_tokens
 
 
+class ConversionAttempt(BaseModel):
+    """Экспорт одного файла во внешнем процессе: сколько попыток и чем кончилось.
+
+    Нужен диагностике: «PDF не получен» без числа попыток и причины не
+    отличает нехватку LibreOffice от сорванного таймаута, а это разные
+    действия для пользователя.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    target: str = ""
+    ok: bool = False
+    attempts: int = Field(default=0, ge=0)
+    seconds: float = Field(default=0.0, ge=0)
+    pages: int | None = None
+    error_kind: str = ""
+    error: str = ""
+    notes: list[str] = Field(default_factory=list)
+
+
 class StageTiming(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -194,6 +215,10 @@ class RunManifest(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
     artifacts: dict[str, str] = Field(default_factory=dict)
+    # Попытки экспорта во внешних процессах (сейчас — только .pptx → .pdf).
+    conversions: list[ConversionAttempt] = Field(default_factory=list)
+    # {формат: почему не получился}. Пусто — получены все форматы.
+    export_errors: dict[str, str] = Field(default_factory=dict)
 
     @property
     def total_seconds(self) -> float:

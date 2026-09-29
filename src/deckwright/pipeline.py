@@ -39,14 +39,18 @@ from deckwright.config import Config
 from deckwright.layout.capacity import achievable, bookend_limits
 from deckwright.layout.matcher import build_deck_ir
 from deckwright.layout.strategy import Strategy
-from deckwright.layout.text_metrics import metrics_for_spec
+from deckwright.layout.text_metrics import (
+    deck_substitutions,
+    find_family,
+    metrics_for_spec,
+)
 from deckwright.llm.base import StructuredClient
 from deckwright.parse.opener import parse_template
 from deckwright.plan.budget import LengthBudget, compute_budget
 from deckwright.plan.planner import Prompt, build_plan, slide_count_text
 from deckwright.render.html import export_html
 from deckwright.render.package_check import check_package
-from deckwright.render.pdf import pptx_to_pdf
+from deckwright.render.pdf import ConversionError, ConversionReport, pptx_to_pdf
 from deckwright.render.png import pdf_to_png
 from deckwright.render.pptx_writer import render_deck, slide_is_single_image
 from deckwright.schemas import (
@@ -54,6 +58,7 @@ from deckwright.schemas import (
     AuditReport,
     CheckKind,
     ContentPack,
+    ConversionAttempt,
     DeckIR,
     DeckPlan,
     FixIteration,
@@ -79,12 +84,13 @@ class PipelineResult:
         layout_issues: list,
         audit: AuditReport,
         pptx: Path,
-        pdf: Path,
+        pdf: Path | None,
         html: Path,
         pages: list[Path],
         manifest: RunManifest,
         context: _RunContext | None = None,
         prepared: PreparedPlan | None = None,
+        export_errors: dict[str, str] | None = None,
     ) -> None:
         self.spec = spec
         self.plan = plan
@@ -92,10 +98,14 @@ class PipelineResult:
         self.layout_issues = layout_issues
         self.audit = audit
         self.pptx = pptx
+        # `pdf` пуст, если LibreOffice не справился. Колода при этом собрана и
+        # годна: частичный результат — это результат, а не провал прогона.
         self.pdf = pdf
         self.html = html
         self.pages = pages
         self.manifest = manifest
+        # {формат: почему не получилось}. Пусто — получилось всё.
+        self.export_errors = dict(export_errors or {})
         # Всё, что нужно, чтобы пересобрать колоду по выбору пользователя, не
         # разбирая шаблон и не планируя заново. UI фазы 11 держит результат
         # между запросами и передаёт его обратно в `apply_selection`.
@@ -112,6 +122,19 @@ class PipelineResult:
     def report(self) -> AuditReport:
         """Синоним `audit`: отчёт называется отчётом в UI и в CLI."""
         return self.audit
+
+    @property
+    def complete(self) -> bool:
+        """Получены ли все три формата, которых требует ТЗ."""
+        return not self.export_errors
+
+    def available_formats(self) -> dict[str, Path]:
+        """Форматы, которые действительно лежат на диске и дописаны."""
+        found: dict[str, Path] = {}
+        for name, path in (("pptx", self.pptx), ("pdf", self.pdf), ("html", self.html)):
+            if path is not None and Path(path).is_file() and Path(path).stat().st_size > 0:
+                found[name] = Path(path)
+        return found
 
 
 @dataclass
@@ -229,13 +252,19 @@ def _timed(manifest: RunManifest, stage: str, on_stage: Callable[[str], None] | 
 
 @dataclass
 class _Built:
-    """Артефакты одной сборки колоды и её отчёт аудита."""
+    """Артефакты одной сборки колоды и её отчёт аудита.
+
+    `pdf` и `pages` необязательны: экспорт в PDF зависит от LibreOffice, и его
+    отказ не должен уносить с собой уже собранный `.pptx`. Что именно не
+    получилось, лежит в `export_errors` и в манифесте прогона.
+    """
 
     pptx: Path
-    pdf: Path
+    pdf: Path | None
     html: Path
     pages: list[Path]
     report: AuditReport
+    export_errors: dict[str, str] = field(default_factory=dict)
 
 
 def _merge_contextual(
@@ -289,11 +318,26 @@ def _build(
     иначе форматы разъехались бы с представлением, а отчёт — с колодой.
     """
     cfg = ctx.cfg
+    # Чем на самом деле будет написана каждая гарнитура колоды — по самой
+    # колоде, а не по одной основной гарнитуре шаблона: заголовок и текст
+    # набраны разными, и подставляются они тоже по-разному.
+    for item in deck_substitutions(deck, spec, cfg.fonts.substitution_slack):
+        note = FontSubstitution(
+            requested=item["requested"], used=item["used"], reason=item["reason"]
+        )
+        if note not in manifest.font_substitutions:
+            manifest.font_substitutions.append(note)
     output_dir = ctx.output_dir
     stem = ctx.stem
 
     with _timed(manifest, "render_pptx", ctx.on_stage):
-        pptx_path = render_deck(deck, spec, template_path, output_dir / f"{stem}.pptx")
+        # Замечания сборки (например, разъехавшиеся имена частей пакета)
+        # идут в паспорт прогона, а не только в stderr.
+        build_notes: list[str] = []
+        pptx_path = render_deck(
+            deck, spec, template_path, output_dir / f"{stem}.pptx", notes=build_notes
+        )
+        manifest.warnings.extend(build_notes)
 
     # Целостность пакета проверяется здесь, а не в тестах: LibreOffice о битых
     # ссылках молчит, и без этой проверки поломка доедет до PowerPoint.
@@ -305,21 +349,60 @@ def _build(
                 f"слайды {single_image} состоят из одной картинки — ТЗ такое не засчитывает"
             )
 
+    # Экспорт в PDF отделён от сборки: `.pptx` уже на диске и годен, а
+    # LibreOffice — внешний процесс, который может не подняться. Его отказ
+    # забирает с собой PNG и контекстный аудит, но не колоду и не HTML.
+    export_errors: dict[str, str] = {}
+    pdf_path: Path | None = None
+    conversion = ConversionReport(source=str(pptx_path))
     with _timed(manifest, "render_pdf", ctx.on_stage):
-        pdf_path = pptx_to_pdf(
-            pptx_path,
-            output_dir,
-            soffice_binary=cfg.render.soffice_binary,
-            timeout_seconds=cfg.render.soffice_timeout_seconds,
-            # Шрифты, извлечённые из шаблона: иначе картинка рисуется не тем
-            # шрифтом, которым фиттер мерил текст.
-            font_dirs={
-                Path(token.file_path).parent
-                for token in spec.fonts
-                if token.embedded and token.file_path
-            },
+        try:
+            pdf_path = pptx_to_pdf(
+                pptx_path,
+                output_dir,
+                soffice_binary=cfg.render.soffice_binary,
+                timeout_seconds=cfg.render.soffice_timeout_seconds,
+                # Шрифты, извлечённые из шаблона: иначе картинка рисуется не тем
+                # шрифтом, которым фиттер мерил текст.
+                font_dirs={
+                    Path(token.file_path).parent
+                    for token in spec.fonts
+                    if token.embedded and token.file_path
+                },
+                # Чем мерили — тем и рисуем: подстановки, выбранные до
+                # раскладки, объявляются конвертеру явно.
+                font_aliases=[
+                    (item["requested"], item["used"])
+                    for item in deck_substitutions(
+                        deck, spec, cfg.fonts.substitution_slack
+                    )
+                ],
+                # Страниц обязано быть столько же, сколько слайдов: расхождение
+                # значит, что конвертация потеряла или удвоила слайд.
+                expected_pages=len(deck.slides),
+                max_attempts=cfg.render.pdf_max_attempts,
+                report=conversion,
+            )
+        except ConversionError as failure:
+            export_errors["pdf"] = str(failure)
+            manifest.warnings.append(
+                f"PDF не получен ({failure.kind}, попыток {failure.attempts}): {failure}"
+            )
+    manifest.conversions.append(
+        ConversionAttempt(
+            source=conversion.source,
+            target=conversion.target,
+            ok=conversion.ok,
+            attempts=conversion.attempts,
+            seconds=conversion.seconds,
+            pages=conversion.pages,
+            error_kind=conversion.error_kind,
+            error=conversion.error,
+            notes=conversion.notes,
         )
+    )
 
+    pages: list[Path] = []
     with _timed(manifest, "render_png", ctx.on_stage):
         # Растеризация — самая дорогая часть пересборки (18 с из 20 на колоде
         # holdout), а итерация цикла трогает два-три слайда. Перерисовываются
@@ -327,12 +410,17 @@ def _build(
         # же, потому что вёрстка каждого слайда не зависит от соседей.
         # Если число страниц изменилось, нумерация поехала — `pdf_to_png`
         # сам возвращается к полной растеризации.
-        pages = pdf_to_png(
-            pdf_path,
-            output_dir / "png",
-            dpi=cfg.render.png_dpi,
-            only_pages=only_slides,
-        )
+        if pdf_path is not None:
+            pages = pdf_to_png(
+                pdf_path,
+                output_dir / "png",
+                dpi=cfg.render.png_dpi,
+                only_pages=only_slides,
+            )
+        else:
+            # Картинок нет — значит нет ни превью, ни контекстного аудита.
+            # Сказать об этом прямо дешевле, чем оставить пустой список.
+            export_errors["png"] = "картинки слайдов не сделаны: нет PDF"
 
     with _timed(manifest, "render_html", ctx.on_stage):
         html_path = export_html(
@@ -346,7 +434,7 @@ def _build(
     # Число страниц PDF обязано совпадать с числом слайдов: расхождение значит,
     # что конвертация потеряла или удвоила слайд, и заметить это можно только
     # сравнением.
-    if len(pages) != len(deck.slides):
+    if pdf_path is not None and len(pages) != len(deck.slides):
         manifest.warnings.append(
             f"страниц в PDF {len(pages)}, а слайдов в колоде {len(deck.slides)}"
         )
@@ -359,7 +447,10 @@ def _build(
             pack,
             cfg,
             pptx_path=pptx_path,
-            pages=pages,
+            # Пустой список и «картинок нет» — разные вещи: во втором случае
+            # отчёт обязан назвать контекстные проверки невыполненными, а не
+            # перечислять их как задан­ные по пустому месту.
+            pages=pages or None,
             client=ctx.vlm_client,
             only_slides=only_slides,
             text_findings=ctx.text_findings,
@@ -374,7 +465,7 @@ def _build(
             report.model_dump_json(indent=2), encoding="utf-8"
         )
 
-    return _Built(pptx_path, pdf_path, html_path, pages, report)
+    return _Built(pptx_path, pdf_path, html_path, pages, report, export_errors)
 
 
 def _fix_iteration(
@@ -420,7 +511,10 @@ def _fix_iteration(
                 if issue.slide_index in set(outcome.rewritten)
             )
             deck, layout_issues = build_deck_ir(
-                spec, outcome.plan, ctx.preset, pack=ctx.pack, siblings=ctx.layouts
+                spec, outcome.plan, ctx.preset, pack=ctx.pack, siblings=ctx.layouts,
+                allow_extra_slides=ctx.cfg.deck.slide_count is None,
+                max_slides=ctx.cfg.deck.max_slides,
+                substitution_slack=ctx.cfg.fonts.substitution_slack,
             )
             return deck, outcome.plan, set(outcome.rewritten), layout_issues
     elif rewrite_targets:
@@ -477,6 +571,10 @@ def _fix_loop(
 
         started = time.monotonic()
         record = FixIteration(number=number, issues_before=len(built.report.issues))
+        # Состояние до попытки: если правка сделает хуже, вернёмся сюда.
+        # Меньшее число находок — не доказательство улучшения: находка
+        # уровня ошибки весит больше трёх информационных.
+        before = (deck, plan, built, layout_issues, built.report.error_count)
         deck, plan, changed, fresh_layout_issues = _fix_iteration(
             chosen, deck, plan, spec, ctx, client, record, manifest
         )
@@ -513,6 +611,23 @@ def _fix_loop(
         )
         record.issues_after = len(built.report.issues)
         record.seconds = round(time.monotonic() - started, 3)
+        if built.report.error_count > before[4]:
+            # Ошибок стало больше, чем было: попытка ухудшила колоду. Откат
+            # именно этой попытки, а не всего цикла — остальные правки
+            # остаются. Находка возвращается в отчёт со своей причиной.
+            deck, plan, built, layout_issues, _ = before
+            record.issues_after = record.issues_before
+            for issue in chosen:
+                record.skipped[issue.key] = (
+                    "правка откачена: ошибок стало больше, чем было "
+                    f"({before[4]} → {record.issues_after})"
+                )
+            record.applied = []
+            manifest.fix_iterations.append(record)
+            manifest.warnings.append(
+                f"итерация {number} откачена: правка добавила ошибок"
+            )
+            break
         manifest.fix_iterations.append(record)
 
     remaining = select(built.report)
@@ -523,6 +638,28 @@ def _fix_loop(
             f"{len(remaining)} находок: предел итераций исчерпан"
         )
     return deck, plan, built, layout_issues
+
+
+def _font_note(family: str) -> FontSubstitution:
+    """Чем разрешилась гарнитура, не встроенная в шаблон."""
+    found = find_family(family)
+    if found is None:
+        return FontSubstitution(
+            requested=family,
+            used="подстановка рендера",
+            reason=(
+                "шрифт не встроен в шаблон и в системе не найден: рендер "
+                "подставит свой, ширины разойдутся с расчётом"
+            ),
+        )
+    return FontSubstitution(
+        requested=family,
+        used=found.family,
+        reason=(
+            f"шрифт не встроен в шаблон, найден в системе: {Path(found.path).name}"
+            + ("" if found.cyrillic else "; кириллицы в нём нет")
+        ),
+    )
 
 
 def _record_vlm(manifest: RunManifest, cfg: Config, client: StructuredClient | None) -> None:
@@ -563,13 +700,19 @@ def _finish(
     """Дописывает манифест: артефакты, бюджет времени, файл на диске."""
     _record_vlm(result_manifest, cfg, ctx.vlm_client)
     result_manifest.finished_at = datetime.now(UTC)
+    # В артефакты попадает только то, что действительно дописано на диск:
+    # интерфейс показывает кнопку скачивания по этому списку, и путь к
+    # неполучившемуся файлу означал бы битую ссылку.
     result_manifest.artifacts = {
         "pptx": str(built.pptx),
-        "pdf": str(built.pdf),
         "html": str(built.html),
         "audit": str(ctx.output_dir / f"{ctx.stem}.audit.json"),
-        "png_dir": str(ctx.output_dir / "png"),
     }
+    if built.pdf is not None:
+        result_manifest.artifacts["pdf"] = str(built.pdf)
+    if built.pages:
+        result_manifest.artifacts["png_dir"] = str(ctx.output_dir / "png")
+    result_manifest.export_errors = dict(built.export_errors)
     if not result_manifest.within_budget(cfg.run.time_budget_seconds):
         # Бюджет — на генерацию трёх вариантов вместе; один вариант, сам по
         # себе вышедший за него, ломает бюджет наверняка.
@@ -746,12 +889,11 @@ def lay_out_variant(
                 ),
             )
         )
+    # Остальные гарнитуры шаблона: сказать не «системный подбор», а что
+    # именно нашлось. Аудитору группы 5 нужно знать не только факт
+    # подстановки, но и чем она разрешилась.
     manifest.font_substitutions.extend(
-        FontSubstitution(
-            requested=token.family,
-            used="системный подбор",
-            reason="шрифт не встроен в шаблон",
-        )
+        _font_note(token.family)
         for token in spec.fonts
         if token.usage_count > 0 and not token.embedded and token.family != source.requested
     )
@@ -815,7 +957,17 @@ def lay_out_variant(
         except KeyError:
             preset = variant
         deck, layout_issues = build_deck_ir(
-            spec, plan, preset, pack=pack, siblings=prepared.layouts
+            spec, plan, preset, pack=pack, siblings=prepared.layouts,
+            # Пользователь задал число слайдов — добавлять свои вёрстка не
+            # вправе: ни делением переполненного, ни переносом с титула.
+            allow_extra_slides=cfg.deck.slide_count is None,
+            # А если не задал — верхняя граница всё равно есть: ТЗ требует
+            # 10–15 слайдов, и лишний слайд не имеет права её перейти.
+            max_slides=cfg.deck.max_slides,
+            # Запас на подстановку шрифта применяется и в вёрстке, а не
+            # только в бюджете длины: мерить чужими ширинами без запаса
+            # значит обещать, что текст влезет.
+            substitution_slack=cfg.fonts.substitution_slack,
         )
     # Находки вёрстки о самой себе едут дальше вместе с колодой: текст, не
     # влезший на минимальной ступени шкалы, обязан быть виден, а не обрезан
@@ -885,6 +1037,7 @@ def complete_variant(laid: LaidOut) -> PipelineResult:
         manifest,
         context=ctx,
         prepared=prepared,
+        export_errors=built.export_errors,
     )
 
 
@@ -919,7 +1072,8 @@ def apply_selection(
     manifest.fix_mode = "selected"
     manifest.fix_iterations = []
     manifest.unresolved = []
-    built = _Built(result.pptx, result.pdf, result.html, result.pages, result.audit)
+    built = _Built(result.pptx, result.pdf, result.html, result.pages,
+                   result.audit, dict(result.export_errors))
 
     deck, plan, built, layout_issues = _fix_loop(
         result.deck,
@@ -948,4 +1102,5 @@ def apply_selection(
         manifest,
         context=ctx,
         prepared=result.prepared,
+        export_errors=built.export_errors,
     )

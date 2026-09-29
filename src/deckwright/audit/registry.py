@@ -187,7 +187,49 @@ CHECKS: tuple[Check, ...] = (
         Severity.INFO,
         "Слайд заполнен меньше порога",
     ),
+    _det(
+        "density.slide_too_full",
+        IssueCategory.DENSITY,
+        Severity.WARNING,
+        "Слайд заполнен больше порога",
+    ),
+    _det(
+        "density.table_too_big",
+        IssueCategory.DENSITY,
+        Severity.WARNING,
+        "Таблица больше 7 строк или 5 колонок",
+    ),
+    _det(
+        "density.too_many_series",
+        IssueCategory.DENSITY,
+        Severity.WARNING,
+        "На диаграмме больше пяти серий",
+    ),
     # ── Целостность ──────────────────────────────────────────────────────
+    _det(
+        "content.placeholder_left",
+        IssueCategory.INTEGRITY,
+        Severity.ERROR,
+        "Остался текст-заглушка шаблона",
+    ),
+    _det(
+        "integrity.chart_unlabelled",
+        IssueCategory.INTEGRITY,
+        Severity.WARNING,
+        "У диаграммы нет подписей осей, единиц или легенды",
+    ),
+    _det(
+        "template.contrast_unverified",
+        IssueCategory.TEMPLATE,
+        Severity.INFO,
+        "Контраст текста не измерен: под ним изображение или неизвестный фон",
+    ),
+    _det(
+        "template.too_many_fonts",
+        IssueCategory.TEMPLATE,
+        Severity.WARNING,
+        "В колоде больше двух гарнитур",
+    ),
     _det(
         "integrity.package_broken",
         IssueCategory.INTEGRITY,
@@ -224,6 +266,24 @@ CHECKS: tuple[Check, ...] = (
         IssueCategory.CONTENT,
         Severity.ERROR,
         "Число не подтверждается контент-пакетом",
+    ),
+    _det(
+        "template.text_too_small",
+        IssueCategory.TEMPLATE,
+        Severity.WARNING,
+        "Кегль ниже читаемого минимума роли",
+    ),
+    _det(
+        "template.text_color_split",
+        IssueCategory.TEMPLATE,
+        Severity.WARNING,
+        "Текст слайда не сведён к одному цвету",
+    ),
+    _det(
+        "content.figure_cites_wrong_fact",
+        IssueCategory.CONTENT,
+        Severity.WARNING,
+        "Число взято из входа, но сослано не на тот источник",
     ),
     _det(
         "content.undeclared_number",

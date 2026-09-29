@@ -39,11 +39,16 @@ from deckwright.config import load_config  # noqa: E402
 from deckwright.content.ingest import IngestInput  # noqa: E402
 from deckwright.llm.fake import RecordedClient  # noqa: E402
 from deckwright.schemas import ContentPack, DeckPurpose, FixKind, Severity  # noqa: E402
+from deckwright.workspace import (  # noqa: E402
+    RunWorkspace,
+    UnsafeUpload,
+    new_run_id,
+    new_session_id,
+)
 
 CONFIG = ROOT / "configs" / "config.yaml"
 SAMPLE_PACK = ROOT / "tests" / "fixtures" / "content_pack.json"
 RECORDED = ROOT / "tests" / "fixtures" / "recorded"
-UPLOADS = ROOT / "outputs" / "uploads"
 
 SEVERITY_MARK = {Severity.ERROR: "●", Severity.WARNING: "●", Severity.INFO: "●"}
 FIX_EXPLANATION = {
@@ -78,11 +83,28 @@ def _require_password() -> bool:
     return False
 
 
-def _save_upload(uploaded, directory: Path) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / uploaded.name
-    path.write_bytes(uploaded.getbuffer())
-    return path
+def _session_id() -> str:
+    """Идентификатор этой вкладки браузера.
+
+    Живёт в `st.session_state`, то есть создаётся один раз на сессию и
+    переживает перезапуски скрипта. По нему прогон получает владельца:
+    реестр прогонов общий на процесс, и без владельца номер чужого прогона
+    открывал бы чужие результаты.
+    """
+    if "session_id" not in st.session_state:
+        st.session_state["session_id"] = new_session_id()
+    return st.session_state["session_id"]
+
+
+def _save_upload(uploaded, workspace: RunWorkspace) -> Path:
+    """Кладёт загруженный файл в каталог этого прогона.
+
+    Имя проходит через `workspace.save_upload`: `../` вырезается, расширение
+    проверяется, одинаковые имена не перетирают друг друга. Раньше файл
+    ложился в общий `outputs/uploads/<исходное имя>` — и два человека с
+    `template.pptx` перезаписывали шаблон друг другу.
+    """
+    return workspace.save_upload(uploaded.name, bytes(uploaded.getbuffer()))
 
 
 def _make_client(cfg, recorded: bool):
@@ -159,6 +181,29 @@ def _sidebar(cfg):
         ),
     )
 
+    # Переписывание текста моделью. Без этого переключателя режим включался
+    # только правкой `config.yaml`: интерфейс показывал галочки у находок,
+    # которые заведомо нечем было исправить, и кнопка «Применить» по ним
+    # молча ничего не делала.
+    can_rewrite = cfg.llm.configured
+    rewrite = st.sidebar.checkbox(
+        "Переписывать текст моделью (assisted)",
+        value=cfg.run.rewrite_assisted and can_rewrite,
+        disabled=not can_rewrite,
+        help=(
+            "Находки «сократить», «разнести пункты», «текст не помещается» "
+            "механической операции не имеют: это решение о содержании. "
+            "С этим флагом отмеченная находка уходит в модель, которая "
+            "переписывает текст слайда; числа, имена и единицы при этом "
+            "защищены. Без ключа модели режим недоступен."
+        ),
+    )
+    if not can_rewrite:
+        st.sidebar.caption(
+            "Переписывание недоступно: не задан ключ модели (LLM_* в .env). "
+            "Отмеченные текстовые находки останутся в отчёте с причиной."
+        )
+
     recorded = st.sidebar.checkbox(
         "Записанные ответы модели",
         value=not cfg.llm.configured,
@@ -174,6 +219,11 @@ def _sidebar(cfg):
     if not st.sidebar.button("Собрать", type="primary", disabled=not ready):
         return None
 
+    # Каталог прогона заводится здесь: до нажатия кнопки его не существует, а
+    # после — все входы ложатся только в него.
+    workspace = RunWorkspace.create(
+        Path(cfg.run.output_dir), new_run_id(), _session_id()
+    )
     if use_sample and not has_input:
         request = ContentPack.model_validate(json.loads(SAMPLE_PACK.read_text("utf-8")))
         if author or author_role or purpose:
@@ -184,19 +234,33 @@ def _sidebar(cfg):
                 update={"brief": request.brief.model_copy(update=updates)}
             )
     else:
+        try:
+            saved = [_save_upload(upload, workspace) for upload in files or []]
+        except UnsafeUpload as refused:
+            st.sidebar.error(str(refused))
+            workspace.cleanup(keep_outputs=False)
+            return None
         request = IngestInput(
             text=text,
-            files=[_save_upload(upload, UPLOADS) for upload in files or []],
+            files=saved,
             purpose=DeckPurpose(purpose) if purpose else None,
             author=author,
             author_role=author_role,
         )
+    try:
+        template_path = _save_upload(template, workspace)
+    except UnsafeUpload as refused:
+        st.sidebar.error(str(refused))
+        workspace.cleanup(keep_outputs=False)
+        return None
     return {
-        "template": _save_upload(template, UPLOADS),
+        "template": template_path,
         "request": request,
         "variants": chosen,
         "fix_mode": fix_mode,
+        "rewrite_assisted": rewrite,
         "recorded": recorded,
+        "workspace": workspace,
     }
 
 
@@ -249,6 +313,23 @@ def _progress(state: runs.RunState, cfg) -> None:
     for column, variant_state in zip(columns, state.variants.values(), strict=False):
         column.metric(variant_state.name, variant_state.stage)
     _stage_times(state)
+
+    # Отмена. Идущий вызов модели прервать нельзя — он уже в пути, — поэтому
+    # кнопка обещает ровно то, что делает: новых задач не будет, а поздний
+    # ответ не опубликуется. Обещать мгновенную остановку было бы неправдой.
+    if not state.finished and not state.cancelled:
+        if st.button(
+            "Отменить прогон",
+            key=f"cancel-{state.run_id}",
+            help=(
+                "Новые задачи не ставятся, поздний ответ модели не публикуется. "
+                "Уже отправленный запрос остановить нельзя — он оплачен."
+            ),
+        ):
+            runs.cancel(state.run_id, _session_id())
+            st.rerun()
+    elif state.cancelled and not state.finished:
+        st.caption("отмена принята: ждём, пока завершатся уже отправленные запросы")
     if state.elapsed > cfg.run.time_budget_seconds:
         st.warning(
             f"прогон идёт {state.elapsed} с при бюджете {cfg.run.time_budget_seconds} с"
@@ -277,12 +358,14 @@ def _pick_key(state: runs.RunState, variant: str, issue_key: str, number: int) -
 def _findings_panel(state: runs.RunState, variant_state: runs.VariantState, client) -> None:
     """Список находок с выбором. Номера совпадают с рамками на слайде."""
     report = variant_state.result.report
+    # «Находок нет» без знаменателя читается как «всё проверено». Покрытие
+    # стоит рядом с итогом, а не прячется в раскрывашке ниже.
     if not report.issues:
-        st.success("Находок нет.")
+        st.success(f"Находок нет. {report.coverage.capitalize()}.")
     else:
         st.caption(
             f"находок {len(report.issues)}, из них ошибок {report.error_count}; "
-            f"применяется само — {len(report.auto_fixable)}"
+            f"применяется само — {len(report.auto_fixable)}; {report.coverage}"
         )
 
     for number, issue in enumerate(report.issues, start=1):
@@ -324,9 +407,28 @@ def _findings_panel(state: runs.RunState, variant_state: runs.VariantState, clie
         )
 
     if report.skipped_checks:
-        with st.expander(f"Не выполнено проверок: {len(report.skipped_checks)}"):
+        with st.expander(
+            f"Не выполнено проверок: {len(report.skipped_checks)} из {report.checks_total}"
+        ):
             for check_id, reason in sorted(report.skipped_checks.items()):
                 st.write(f"`{check_id}` — {reason}")
+
+    # Отмеченное, что этот прогон применить не может: текстовые находки при
+    # выключенном переписывании. Кнопка остаётся рабочей — механические
+    # правки применятся, — но обещание даётся честное.
+    chosen = [issue for issue in report.issues if issue.key in variant_state.selected]
+    helpless = [
+        issue
+        for issue in chosen
+        if issue.fix.kind is FixKind.ASSISTED
+        and not (state.cfg is not None and state.cfg.run.rewrite_assisted)
+    ]
+    if helpless:
+        st.info(
+            f"Из отмеченного {len(helpless)} требует переписывания текста, а режим "
+            "выключен: эти находки останутся в отчёте с причиной. Включите "
+            "«Переписывать текст моделью» в панели слева и соберите заново."
+        )
 
     disabled = variant_state.applying or not variant_state.selected
     if st.button(
@@ -381,27 +483,80 @@ def _await_fix(variant_state: runs.VariantState) -> None:
         st.rerun(scope="app")
 
 
-def _downloads(variant_state: runs.VariantState) -> None:
+def _downloads(state: runs.RunState, variant_state: runs.VariantState, cfg) -> None:
+    """Кнопки скачивания — только для проверенных, дописанных файлов.
+
+    `available_formats()` отдаёт то, что действительно лежит на диске и
+    непусто. Формат, который не получился, не превращается в битую кнопку:
+    про него говорится прямо и предлагается повторить ровно его.
+    """
     result = variant_state.result
+    available = result.available_formats()
     columns = st.columns(3)
-    for column, label, path in (
-        (columns[0], "Скачать .pptx", result.pptx),
-        (columns[1], "Скачать .pdf", result.pdf),
-        (columns[2], "Скачать .html", result.html),
-    ):
-        if Path(path).exists():
+    for column, fmt in zip(columns, ("pptx", "pdf", "html"), strict=True):
+        path = available.get(fmt)
+        if path is not None:
             column.download_button(
-                label,
-                data=Path(path).read_bytes(),
-                file_name=Path(path).name,
-                key=f"dl-{variant_state.name}-{Path(path).suffix}",
+                f"Скачать .{fmt}",
+                data=path.read_bytes(),
+                file_name=path.name,
+                key=f"dl-{state.run_id}-{variant_state.name}-{fmt}",
+            )
+        else:
+            column.button(
+                f".{fmt} недоступен",
+                disabled=True,
+                key=f"dl-off-{state.run_id}-{variant_state.name}-{fmt}",
             )
 
+    if not result.export_errors:
+        return
 
-def _variant_tab(state: runs.RunState, variant_state: runs.VariantState, client) -> None:
+    missing = ", ".join(sorted(result.export_errors))
+    st.warning(
+        f"Готово не всё: не получен {missing}. Колода собрана и скачивается — "
+        "не получился только экспорт."
+    )
+    with st.expander("Почему не получилось"):
+        for fmt, reason in sorted(result.export_errors.items()):
+            st.write(f"**{fmt}** — {reason}")
+    if variant_state.exporting:
+        _await_export(variant_state)
+    elif "pdf" in result.export_errors and st.button(
+        "Повторить только экспорт PDF",
+        key=f"retry-{state.run_id}-{variant_state.name}",
+        help="Колода не пересобирается и модель не вызывается: берётся "
+             "готовый .pptx и конвертируется заново.",
+    ):
+        runs.retry_export(state, variant_state.name, cfg)
+        st.rerun()
+
+
+@st.fragment(run_every=2)
+def _await_export(variant_state: runs.VariantState) -> None:
+    """Ждёт конца повторного экспорта, не перезапуская всю страницу."""
+    if variant_state.exporting:
+        st.info("Повторяю экспорт PDF…")
+    else:
+        st.rerun(scope="app")
+
+
+def _variant_tab(state: runs.RunState, variant_state: runs.VariantState, client, cfg) -> None:
     result = variant_state.result
     if result is None:
-        st.info(f"{variant_state.name}: {variant_state.stage}")
+        if variant_state.error:
+            # Вариант не собрался. Сказать почему и куда смотреть — иначе
+            # вкладка выглядит вечно «ожидающей», а остальные варианты
+            # при этом готовы и скачиваются.
+            st.error(f"{variant_state.name}: {variant_state.stage}")
+            st.caption(variant_state.error)
+            if state.workspace is not None:
+                st.caption(
+                    "Подробности: "
+                    f"`{state.workspace.diag / (variant_state.name + '.error.txt')}`"
+                )
+        else:
+            st.info(f"{variant_state.name}: {variant_state.stage}")
         return
     if variant_state.error:
         st.error(variant_state.error)
@@ -413,7 +568,7 @@ def _variant_tab(state: runs.RunState, variant_state: runs.VariantState, client)
     columns[2].metric("ошибок", result.report.error_count)
     columns[3].metric("время, с", manifest.total_seconds)
 
-    _downloads(variant_state)
+    _downloads(state, variant_state, cfg)
 
     slides, findings = st.columns([3, 2])
     with slides:
@@ -469,13 +624,22 @@ def main() -> None:
 
     if request is not None:
         client, vlm = _make_client(cfg, request["recorded"])
+        # Выбор пользователя сильнее умолчания конфига и живёт ровно один
+        # прогон: снимок настроек прогона неизменяем.
+        cfg = cfg.model_copy(
+            update={
+                "run": cfg.run.model_copy(
+                    update={"rewrite_assisted": bool(request["rewrite_assisted"])}
+                )
+            }
+        )
         state = runs.start(
             template_path=request["template"],
             request=request["request"],
             cfg=cfg,
             client=client,
             variants=request["variants"],
-            output_root=cfg.run.output_dir,
+            workspace=request["workspace"],
             vlm_client=vlm,
             fix_mode=request["fix_mode"],
         )
@@ -484,9 +648,20 @@ def main() -> None:
         st.query_params["run"] = state.run_id
         st.rerun()
 
+    # Прогон ищется в пределах своей сессии: и по номеру из адреса, и как
+    # последний. Чужой номер сюда не приведёт — `runs.get` сверяет владельца.
+    owner = _session_id()
     run_id = st.query_params.get("run")
-    state = runs.get(run_id) if run_id else runs.latest()
+    state = runs.get(run_id, owner) if run_id else runs.latest(owner)
     if state is None:
+        if run_id:
+            st.warning(
+                "Прогон не найден в этой сессии. Ссылка на прогон работает "
+                "только в той вкладке, где он запущен: результаты не общие."
+            )
+            # Чужой номер в адресе только мешает — убираем, чтобы страница
+            # вернулась к обычному виду.
+            st.query_params.clear()
         st.info(
             "Загрузите шаблон, впишите бриф или приложите материалы слева, "
             "затем нажмите «Собрать»."
@@ -508,7 +683,7 @@ def main() -> None:
         tabs = st.tabs([variant_state.name for variant_state in state.variants.values()])
         for tab, variant_state in zip(tabs, state.variants.values(), strict=False):
             with tab:
-                _variant_tab(state, variant_state, client)
+                _variant_tab(state, variant_state, client, cfg)
 
 
 

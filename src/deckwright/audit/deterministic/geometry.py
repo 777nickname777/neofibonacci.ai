@@ -90,12 +90,32 @@ def out_of_bounds(slide: SlideIR, deck: DeckIR) -> list[Issue]:
 
 
 def overlaps(slide: SlideIR) -> list[Issue]:
-    """Текст поверх текста читается как каша, но все структурные проверки проходит."""
+    """Текст поверх текста или поверх данных читается как каша.
+
+    График и таблица раньше в сравнение не входили — проверка смотрела
+    только текст на текст. На `vk_tech` подпись слайда лежала целиком
+    внутри рамки графика, и аудит сообщал о нуле наложений: читаемость
+    держалась на том, что столбик в этом месте оказался невысоким.
+
+    Текст внутри рамки данных — почти всегда авария, но не всегда: подпись
+    оси и значение живут внутри графика по замыслу. Различаем по тому, кто
+    рисует текст: собственные подписи графика в `SlideIR` отдельными
+    элементами не лежат, поэтому любой текстовый элемент поверх данных —
+    наш, и он там лишний.
+    """
     found: list[Issue] = []
-    elements = [e for e in slide.all_elements() if e.text is not None]
+    elements = [
+        e
+        for e in slide.all_elements()
+        if e.text is not None or e.chart is not None or e.table is not None
+    ]
     for first in range(len(elements)):
         for second in range(first + 1, len(elements)):
             a, b = elements[first], elements[second]
+            if a.text is None and b.text is None:
+                # График рядом с таблицей — вопрос вёрстки, а не читаемости
+                # текста: их наложение ловит проверка полей и границ.
+                continue
             area = _overlap_area(a.box, b.box)
             smaller = min(a.box.w * a.box.h, b.box.w * b.box.h)
             if smaller <= 0 or area / smaller <= OVERLAP_TOLERANCE:
@@ -120,7 +140,9 @@ def overlaps(slide: SlideIR) -> list[Issue]:
 # Поле текстовой рамки по умолчанию (OOXML): 0.05″ сверху и снизу.
 _INSET = 45_720
 # Пересечение уже этого — касание краем, а не наложение.
-_TOUCH = 18_288  # 0.02″
+# Какую часть меньшего из двух — текста или графики — заход обязан
+# накрыть, чтобы считаться наложением, а не касанием угла.
+_COVERED_SHARE = 0.25
 
 
 def text_over_decor(slide: SlideIR, spec: TemplateSpec) -> list[Issue]:
@@ -131,20 +153,45 @@ def text_over_decor(slide: SlideIR, spec: TemplateSpec) -> list[Issue]:
     `vk_tech` оставалась незамеченной под нашим текстом. Графика берётся из
     разбора шаблона (`Pattern.decor`), текст — полосой, которую он реально
     занимает: строки × кегль с учётом привязки рамки по вертикали.
+
+    Оформление живёт не только на слайде-доноре: фотография, логотип и
+    декоративная графика чаще лежат в макете и образце. Они приходят
+    отдельным списком (`Pattern.layout_obstacles`) — вёрстка их обходит, и
+    аудит обязан о них знать, иначе находка теряется ровно там, где её никто
+    не увидит. Подложки макета (`Pattern.layout_backdrops`) — наоборот,
+    предусмотренное дизайнером место под текст: тёмная панель поверх фото
+    затем и нарисована, чтобы на ней писали. Текст внутри подложки находкой
+    не считается.
     """
     pattern = next((p for p in spec.patterns if p.id == slide.pattern_id), None)
-    if pattern is None or not pattern.decor:
+    if pattern is None:
         return []
+    artwork = list(pattern.decor) + list(pattern.layout_obstacles)
+    if not artwork:
+        return []
+    panels = list(pattern.layout_backdrops)
     found: list[Issue] = []
     for element in slide.all_elements():
         if element.text is None or not element.text.paragraphs:
             continue
         band = text_band(element)
-        for item in pattern.decor:
+        if any(panel.contains(band) for panel in panels):
+            continue
+        for item in artwork:
             hit = item.intersection(band)
-            # Край в край — касание; линия вплотную под последней строкой
-            # глазом читается как подчёркивание, но это не наложение.
-            if hit is None or hit.w <= _TOUCH or item.contains(band):
+            if hit is None or item.contains(band):
+                continue
+            # Край в край — касание. Прежняя мерка прощала узкую по ширине
+            # полоску, и та же полоска по высоте считалась наложением: на
+            # `vk_workspace` заголовок задевал значок нижней кромкой на
+            # 0,06″ и получал находку, хотя на листе стоит выше него.
+            # Мерка по доле симметрична и не зависит от того, какой стороной
+            # рамки задета графика: прощается заход, не накрывающий заметной
+            # части ни текста, ни самой графики. Угол сетки точек, срезанный
+            # краем рамки, — касание; линия под строкой лежит в полосе
+            # целиком и остаётся наложением, хотя она тоньше допуска.
+            smaller = min(band.w * band.h, item.w * item.h)
+            if smaller > 0 and (hit.w * hit.h) / smaller < _COVERED_SHARE:
                 continue
             found.append(
                 _issue(

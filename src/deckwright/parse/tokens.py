@@ -25,7 +25,16 @@ from dataclasses import dataclass, field
 from lxml import etree
 
 from deckwright.parse.geometry import iter_shapes
-from deckwright.schemas import Box, Color, ColorToken, FontToken, Grid, Provenance, SourceKind
+from deckwright.schemas import (
+    Box,
+    Color,
+    ColorToken,
+    FontToken,
+    Grid,
+    Provenance,
+    SourceKind,
+    hardest_ground,
+)
 
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -247,6 +256,85 @@ def backdrop_color(
     return best[1] if best else None
 
 
+# Порог контраста Приложения 1 — тот же, что у вёрстки и аудита. Здесь он
+# нужен, чтобы ответить на один вопрос: спорят ли две заливки под одной
+# рамкой, то есть есть ли цвет, читаемый на обеих.
+# Доля рамки, начиная с которой заливка считается фоном её текста, а не
+# декором, задевшим рамку углом.
+GROUND_SHARE = 0.12
+def fill_colors(
+    element: etree._Element, theme: dict[str, str], clr_map: dict[str, str]
+) -> list[Color]:
+    """Цвета заливки фигуры: у сплошной один, у градиента — все опорные.
+
+    Градиент читается не для красоты. Карточки `vk_workspace` залиты
+    `00AEE8`→`0077FF`, и пока здесь искался только `a:solidFill`, подложка
+    выходила `None`: цвет текста выбирался по чёрному фону слайда, и по
+    яркому голубому писалось белым — 2.8:1 в отрисованном PDF. По любому
+    из опорных цветов этого градиента читается чёрный (5.1:1 и 8.1:1).
+
+    Опорные цвета — не весь градиент: между ними лежат промежуточные. Но
+    у линейного перехода яркость монотонна между соседними опорами, так
+    что крайние случаи — именно опоры, и решение по ним верно для всей
+    заливки.
+    """
+    spr = element.find(f"{{{P_NS}}}spPr")
+    if spr is None:
+        return []
+    solid = spr.find(f"{{{A_NS}}}solidFill")
+    if solid is not None:
+        color = resolve_color(solid, theme, clr_map)
+        return [color] if color is not None else []
+    gradient = spr.find(f"{{{A_NS}}}gradFill")
+    if gradient is None:
+        return []
+    stops = []
+    for stop in gradient.findall(f"{{{A_NS}}}gsLst/{{{A_NS}}}gs"):
+        color = resolve_color(stop, theme, clr_map)
+        if color is not None:
+            stops.append(color)
+    return stops
+
+
+def ground_regions(
+    container: etree._Element,
+    box: Box,
+    theme: dict[str, str],
+    clr_map: dict[str, str],
+    base: Color | None = None,
+    min_share: float = GROUND_SHARE,
+) -> list[tuple[Box, list[Color], int]]:
+    """Заливки, видимые под рамкой, вместе с их областями.
+
+    Вместе с порядком отрисовки: что нарисовано позже, то и видно. В
+    отличие от `local_backdrop` сюда попадают и заливки, накрывающие рамку
+    лишь частью: шапка карточки, полоса под заголовком, плашка в углу.
+    Именно они делают фон неоднородным, и по ним решается, не лежит ли
+    рамка сразу на двух фонах, требующих разного цвета текста.
+    """
+    found: list[tuple[int, Box, list[Color], int]] = []
+    for order, (element, shape_box, _) in enumerate(iter_shapes(container)):
+        if shape_box is None or shape_box.area <= 0:
+            continue
+        inside = shape_box.intersection(box)
+        if inside is None or inside.area < min_share * box.area:
+            continue
+        colors = fill_colors(element, theme, clr_map)
+        if not colors:
+            continue
+        if base is not None:
+            colors = [
+                color if color.alpha >= 1.0 else _over(color, base)
+                for color in colors
+            ]
+        elif any(color.alpha < 1.0 for color in colors):
+            continue
+        found.append((shape_box.area, shape_box, colors, order))
+    # От крупной к тесной: ближе к тексту лежит самая тесная фигура.
+    found.sort(key=lambda item: -item[0])
+    return [(shape_box, colors, order) for _, shape_box, colors, order in found]
+
+
 def local_backdrop(
     container: etree._Element,
     box: Box,
@@ -264,10 +352,11 @@ def local_backdrop(
     Такие заливки накладываются по порядку, от самой крупной фигуры к самой
     тесной, поверх `base` — фона слайда. Фон неизвестен — неизвестен и цвет.
 
-    Картинку и градиент так не распознать: это задача растра, здесь —
-    только сплошные заливки.
+    Градиент читается по опорным цветам (`fill_colors`) и сводится к тому
+    из них, на котором текст читается хуже всего. Картинку так не
+    распознать: это задача растра.
     """
-    layers: list[tuple[int, Color]] = []
+    layers: list[tuple[int, list[Color]]] = []
     for element, shape_box, _ in iter_shapes(container):
         if shape_box is None or shape_box.area <= 0:
             continue
@@ -275,21 +364,24 @@ def local_backdrop(
         inside_h = min(shape_box.bottom, box.bottom) - max(shape_box.y, box.y)
         if inside_w <= 0 or inside_h <= 0 or inside_w * inside_h < 0.9 * box.area:
             continue
-        fill = element.find(f"{{{P_NS}}}spPr/{{{A_NS}}}solidFill")
-        if fill is None:
-            continue
-        color = resolve_color(fill, theme, clr_map)
-        if color is not None:
-            layers.append((shape_box.area, color))
+        colors = fill_colors(element, theme, clr_map)
+        if colors:
+            layers.append((shape_box.area, colors))
     if not layers:
         return None
-    seen = base
-    for _, color in sorted(layers, key=lambda layer: -layer[0]):
-        if color.alpha >= 1.0:
-            seen = color
-        elif seen is not None:
-            seen = _over(color, seen)
-    return seen
+    seen: list[Color] = [base] if base is not None else []
+    for _, colors in sorted(layers, key=lambda layer: -layer[0]):
+        if all(color.alpha >= 1.0 for color in colors):
+            seen = colors
+        elif seen:
+            seen = [
+                color if color.alpha >= 1.0 else _over(color, under)
+                for color in colors
+                for under in seen
+            ]
+    # Из нескольких цветов одной заливки — тот, на котором тексту тяжелее:
+    # порог обязан держаться на всём градиенте, а не в его середине.
+    return hardest_ground(seen)
 
 
 def _over(top: Color, bottom: Color) -> Color:
@@ -331,6 +423,20 @@ def _collect_colors(
 
 # Ссылки на шрифты темы. Текст, набранный ими, не называет гарнитуру прямо.
 THEME_FONT_REFS = {"+mj-lt": "major", "+mn-lt": "minor", "+mj-ea": "major", "+mn-ea": "minor"}
+
+
+def resolve_typeface(face: str | None, theme_fonts: dict[str, str]) -> str | None:
+    """Гарнитура с разрешённой ссылкой на тему. None — нечего разрешать.
+
+    `+mj-lt` и `+mn-lt` — не имена шрифтов, а ссылки на заголовочную и
+    основную гарнитуру темы. Оставить их как есть значит записать в файл
+    несуществующее семейство и мерить текст неизвестно чем.
+    """
+    if not face:
+        return None
+    if face.startswith("+"):
+        return theme_fonts.get(THEME_FONT_REFS.get(face, "")) or None
+    return face
 
 
 def _collect_typography(

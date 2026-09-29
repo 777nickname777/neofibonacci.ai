@@ -12,19 +12,30 @@
 разрешение переполнения. Подставленный шрифт шире или уже настоящего, и
 рассчитанная вёрстка перестаёт соответствовать тому, что увидит человек.
 
-Распаковка идёт через `libeot` — она есть в дистрибутивах как разделяемая
-библиотека и приезжает вместе с LibreOffice. Отдельного исполняемого файла
-`eot2ttf` в пакетах нет, поэтому вызов идёт напрямую через `ctypes`.
+Распаковка идёт через `libeot` — в дистрибутивах Linux это пакет `libeot0`.
+Отдельного исполняемого файла `eot2ttf` в пакетах нет, поэтому вызов идёт
+напрямую через `ctypes`. Имя файла библиотеки платформозависимо, и искать её
+приходится по списку — см. `libeot_candidates`.
 """
 
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
+import os
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-LIBEOT_SONAME = "libeot.so.0"
+# Имя файла разделяемой библиотеки зависит от платформы: в дистрибутивах Linux
+# это `libeot.so.0`, в macOS — `libeot.0.dylib`. Одно жёстко вписанное имя
+# делало встроенные шрифты недоступными на второй платформе молча: разбор не
+# падал, а тихо переходил на подставленный шрифт, и вёрстка считалась по чужим
+# ширинам. Порядок проверки: явный путь из окружения, затем то, что нашёл
+# линковщик, затем известные имена.
+LIBEOT_ENV_VAR = "DECKWRIGHT_LIBEOT"
+LIBEOT_SONAMES = ("libeot.so.0", "libeot.so", "libeot.0.dylib", "libeot.dylib")
+LIBEOT_SYMBOL = "EOT2ttf_buffer"
 
 _u8, _u16, _u32 = ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint32
 
@@ -99,14 +110,41 @@ class FontExtractionError(RuntimeError):
     """Встроенный шрифт не распаковался."""
 
 
+def libeot_candidates() -> tuple[str, ...]:
+    """Имена и пути, по которым библиотеку стоит искать, в порядке проверки."""
+    names: list[str] = []
+    explicit = os.environ.get(LIBEOT_ENV_VAR, "").strip()
+    if explicit:
+        names.append(explicit)
+    found = ctypes.util.find_library("eot")
+    if found:
+        names.append(found)
+    names.extend(LIBEOT_SONAMES)
+    return tuple(dict.fromkeys(names))
+
+
+def load_libeot() -> tuple[ctypes.CDLL, str]:
+    """Загруженная библиотека и имя, по которому она нашлась.
+
+    Причины всех неудачных попыток сохраняются в сообщении: «библиотеки нет» и
+    «есть, но другой архитектуры» — разные беды с разным лечением, и без текста
+    ошибки их не различить.
+    """
+    reasons: list[str] = []
+    for name in libeot_candidates():
+        try:
+            return ctypes.CDLL(name), name
+        except OSError as exc:
+            reasons.append(f"{name}: {exc}")
+    raise FontExtractionError(
+        "libeot недоступна: без неё встроенные шрифты не извлечь, и вёрстка "
+        "будет считаться по метрикам подставленного шрифта. Попытки — "
+        + "; ".join(reasons)
+    )
+
+
 def _library() -> ctypes.CDLL:
-    try:
-        lib = ctypes.CDLL(LIBEOT_SONAME)
-    except OSError as exc:
-        raise FontExtractionError(
-            f"{LIBEOT_SONAME} недоступна: без неё встроенные шрифты не извлечь, "
-            "и вёрстка будет считаться по метрикам подставленного шрифта"
-        ) from exc
+    lib, _ = load_libeot()
     lib.EOT2ttf_buffer.argtypes = [
         ctypes.POINTER(_u8),
         ctypes.c_uint,
